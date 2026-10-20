@@ -48,6 +48,7 @@ import {
   upsertVectors,
   getSyncState,
   listDevices,
+  ensureSchema,
 } from './db.js';
 
 // ---------------------------------------------------------------------------
@@ -75,6 +76,19 @@ export async function handleSyncUpload(request, env) {
   });
   if (!auth.ok) {
     return { status: auth.error.status, body: { error: auth.error.code, message: auth.error.message } };
+  }
+
+  // CREATE INDEX IF NOT EXISTS, cached per-isolate. See the long comment
+  // on ensureSchema(): 0001_initial.sql declares a composite FK from
+  // conversations to devices without a matching UNIQUE index on the parent,
+  // which D1 rejects on every insert.
+  try {
+    await ensureSchema(env.DB);
+  } catch (err) {
+    return {
+      status: 500,
+      body: { error: 'schema_error', message: String((err && err.message) || err) },
+    };
   }
 
   const body = await safeJson(request);

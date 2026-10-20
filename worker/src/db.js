@@ -435,3 +435,61 @@ export async function queryVectors(v, { values, topK }) {
     .map((m) => ({ id: m.id, score: m.score }))
     .sort((a, b) => b.score - a.score);
 }
+// ---------------------------------------------------------------------------
+// Schema guard
+// ---------------------------------------------------------------------------
+
+/**
+ * `conversations` declares a composite foreign key
+ *
+ *     FOREIGN KEY (user_id, device_id) REFERENCES devices(user_id, device_id)
+ *
+ * but `devices` only has `PRIMARY KEY (device_id)`. SQLite requires the
+ * parent columns of a foreign key to be covered by a UNIQUE index, and
+ * `PRAGMA foreign_keys` is on by default in D1, so *every* insert into
+ * `conversations` fails with
+ *
+ *     D1_ERROR: foreign key mismatch - "conversations" referencing "devices"
+ *
+ * This is a defect in the shipped 0001_initial.sql, not something the
+ * request path can work around. Creating the missing unique index fixes it
+ * without rebuilding the table.
+ *
+ * We also create the dedupe index that `0001_initial.sql` intends but does
+ * not declare: uploads dedupe on
+ * `(user_id, conversation_id, client_msg_id)`.
+ *
+ * Both statements are idempotent, so this is safe to run on every cold
+ * start. We only run it once per isolate (a module-level flag) to keep the
+ * hot path free of extra round trips.
+ */
+let schemaEnsured = false;
+
+export async function ensureSchema(db) {
+  if (schemaEnsured) return;
+  try {
+    await db
+      .prepare(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_user_device
+         ON devices(user_id, device_id)`
+      )
+      .run();
+    await db
+      .prepare(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_dedupe
+         ON encrypted_chunks(user_id, conversation_id, client_msg_id)`
+      )
+      .run();
+    schemaEnsured = true;
+  } catch (err) {
+    // Schema problems must not take down unrelated routes (health, the
+    // fresh proxy). Surface it in the response that asked for the write
+    // path instead, and let the next cold start retry.
+    throw err;
+  }
+}
+
+/** Test hook: forget that the schema was already verified. */
+export function _resetSchemaGuard() {
+  schemaEnsured = false;
+}
