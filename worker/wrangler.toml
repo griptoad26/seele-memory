@@ -17,6 +17,7 @@
 
 name = "seele-memory"
 main = "src/index.js"
+workers_dev = true
 compatibility_date = "2026-10-01"
 
 # Two specific route patterns so this Worker coexists with the existing
@@ -36,7 +37,7 @@ routes = [
 [[d1_databases]]
 binding = "DB"
 database_name = "seele-memory-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "c0613b07-0479-49e3-8369-5ed3bf1d6cb5"
 migrations_dir = "migrations"
 
 # Vectorize has no migration system in wrangler.toml today; provision with
