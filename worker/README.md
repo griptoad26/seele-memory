@@ -8,11 +8,27 @@ Cloudflare Worker implementing the seele-cloud memory backend. See
 | Mount | Role |
 |-------|------|
 | `/api/mem/health` | Phase 1 acceptance criterion — reports D1 + Vectorize readiness |
-| `/api/sync/*`, `/mem/v1/*`, `/api/keys/*`, `/api/bots*` | Phase 2/4 surface — returns `501 not_implemented` with a roadmap payload until real handlers ship (TASK-093 etc.) |
+| `/api/keys/register`, `/api/bots*`, `/api/sync/*`, `/mem/v1/*` | Phase 2+ surface — full sync, recall, bot-grant API |
 | `/fresh/*`, everything else | seele-fresh cache-busting proxy (carried over from `devops-agent/drafts/cf-worker/seele-fresh`); preserves `seele.agency`'s static GitHub Pages behavior |
 
-The proxy exists because `seele.agency` is a GitHub Pages site; the proxy
-strips Cloudflare caching so users always get fresh content.
+## Routes (current)
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| POST | `/api/keys/register` | none | First-time device registration. Returns `device_id` + long-lived device token (JWT, 365d, scope=memory:write). |
+| POST | `/api/bots` | Bearer (memory:write) | Create a bot. Returns bot_id, grant JWT (15m default), scope_tags, private_key (Ed25519 PKCS8, returned once). |
+| GET | `/api/bots` | Bearer (memory:write) | List the caller's bots. |
+| POST | `/api/bots/:id/revoke` | Bearer (memory:write) | Revoke a bot. Subsequent grant JWTs for this bot fail with `bot_revoked`. |
+| POST | `/mem/v1/recall` | Bearer (memory:recall or write) | Vector top-K recall. Body: `{query_vector: number[384], top_k?, since?}`. Returns encrypted snippets. |
+| POST | `/mem/v1/full-recall` | Bearer (memory:recall or write) | Keyword scan fallback (D1 LIKE on chunk_id). Body: `{query, limit?, since?}`. Returns encrypted snippets. |
+| POST | `/api/sync/upload` | Bearer (memory:write) | Ingest one xkg-core SyncEnvelope. Dedupe on `(user_id, conversation_id, client_msg_id)`. Embedding upserted to Vectorize. |
+| POST | `/api/sync/download` | Bearer (memory:recall or write) | Get envelopes since a cursor. Body: `{since?, limit?}`. |
+| GET | `/api/sync/state` | Bearer (memory:recall or write) | Per-device sync watermark. Query: `?device_id=`. |
+| GET | `/api/sync/devices` | Bearer (memory:recall or write) | List the caller's devices. |
+
+All authenticated routes accept either a device grant (issuer=`seele-cloud:device`,
+bot_id=device_id, 365d) or a bot grant (issuer=`seele-cloud:bot`, bot_id=row id,
+≤24h). Both share the same `Bearer <jwt>` shape and JWT secret.
 
 ## Bindings (wrangler.toml)
 
@@ -20,9 +36,36 @@ strips Cloudflare caching so users always get fresh content.
 |---------|------|----------|
 | `DB` | D1 | `seele-memory-db` |
 | `VECTORIZE` | Vectorize | `seele-memory-embeddings` (384 dims, cosine) |
+| `GRANT_JWT` | secret | HS256 secret for all grant JWTs. **Set via `wrangler secret put GRANT_JWT`** — never check it in. |
 
-Both are referenced via `index_name` / `database_name` so wrangler resolves
-them at deploy time against the account's resource list.
+## Privacy model — Option D (E2EE / Sovereign)
+
+This Worker is **stateless with respect to plaintext**. It stores:
+
+- **Ciphertext blobs** in `encrypted_chunks.body_encrypted` (AES-256-GCM
+  ciphertext, base64).
+- **Embeddings** in Vectorize (`seele-memory-embeddings`, 384d cosine).
+  Embeddings are computed on-device and leak less than plaintext, but
+  are not zero-risk for short snippets. The tradeoff is explicit and
+  documented in `src/recall.js`.
+- **Public keys** in `users.public_key_ed25519` and `bots.public_key_ed25519`.
+  Private keys never leave the device / bot.
+
+The Worker **does not** store: master keypairs, BIP-39 phrases, plaintext
+conversation bodies, or plaintext search queries.
+
+### Recall round-trip
+
+1. Bot mints query embedding locally (e.g., `@xenova/all-MiniLM-L6-v2`).
+2. Bot calls `POST /mem/v1/recall` with the 384-dim vector.
+3. Worker queries Vectorize for top-K chunk_ids.
+4. Worker fetches those rows from D1, scoped to `user_id = claims.sub`.
+5. Worker returns opaque ciphertext blobs. **The bot decrypts on its side.**
+6. Bot uses decrypted snippets as RAG context.
+
+The plaintext never crosses the Worker boundary. Cross-user isolation is
+enforced at the SQL level (`WHERE user_id = ?`) — see the cross-user
+isolation test in `test/recall.test.js`.
 
 ## Provisioning (one-time)
 
@@ -39,65 +82,55 @@ Creates `seele-memory-db` (D1) and `seele-memory-embeddings` (Vectorize,
 ./scripts/deploy.sh
 # or step-by-step:
 wrangler d1 execute seele-memory-db --remote --file=migrations/0001_initial.sql
+wrangler secret put GRANT_JWT      # paste the secret value at the prompt
 wrangler deploy
 ```
 
 ## Verify
 
 ```bash
-curl -sS https://seele.agency/api/mem/health | python3 -m json.tool
+# Health
+curl -sS https://seele-memory.griptoad.workers.dev/api/mem/health | python3 -m json.tool
+
+# Register a device
+curl -sS -X POST https://seele-memory.griptoad.workers.dev/api/keys/register \
+  -H 'content-type: application/json' \
+  -d '{"user_id":"u-test","device":{"device_id":"d-test","name":"d","platform":"linux","app_version":"0"}}'
 ```
 
-Expected:
+Note: `seele.agency/api/*` does not reach this Worker (Pages custom
+domains shadow Worker routes on the same hostname). The canonical base
+URL is `https://seele-memory.griptoad.workers.dev`. See
+`./ROUTING.md` for the long-form hostname situation and exit options.
 
-```json
-{
-  "ok": true,
-  "service": "seele-cloud",
-  "version": "0.1.0-phase1",
-  "phase": 1,
-  "checks": { "d1": { "ok": true, "tables": 6 }, "vectorize": { "ok": true } }
-}
+## Tests
+
+```bash
+npm install
+npm test
 ```
 
-## Planned-route behavior (501 payload)
+Vitest covers:
 
-Any request to a Phase 2+ endpoint (e.g. `POST /api/sync/upload`) returns:
+* Grant JWT — valid / expired / wrong-scope / bad-signature / claim-validation paths
+* Bot lifecycle — create / list / revoke / cross-user / second-revoke idempotency
+* Sync — upload (idempotent dedupe), download, state, devices
+* Recall — happy-path / top_k clamping / cross-user isolation (critical) /
+  Vectorize-with-phantom-id safety
+* full-recall — keyword scan
 
-```http
-HTTP/1.1 501 Not Implemented
-content-type: application/json
-
-{
-  "error": "not_implemented",
-  "phase": 1,
-  "path": "/api/sync/upload",
-  "planned": "POST — upload one encrypted envelope (Phase 2)",
-  "message": "seele-cloud is at Phase 1. See SPEC.md for the phased rollout."
-}
-```
-
-This intentionally avoids `404` so the Phase 5 integration test can assert
-"route exists" without depending on real handlers.
+Tests run against an in-memory fake D1 (`test/fake-d1.js`) and a
+fake Vectorize (`test/fake-vectorize.js`); no live Cloudflare access
+required for the unit suite.
 
 ## CF Access policies (manual dashboard step)
 
-Per SPEC.md §"Authentication", CF Access email-link policies attach to
+Per SPEC §"Authentication", CF Access email-link policies attach to
 `/api/*` and `/mem/*` to gate user identity. **CF Access policies live in
 the Cloudflare dashboard, not in wrangler.toml** — wrangler cannot manage
-access apps on behalf of a zone. The required steps are:
-
-1. Cloudflare dashboard → `seele.agency` zone → **Access** → **Applications**.
-2. Create a self-hosted application:
-   * Name: `seele-cloud-api`
-   * Domain: `seele.agency`
-   * Path: `/api/*` (add a second application or a second policy with path `/mem/*`)
-   * Identity providers: Cloudflare's built-in email-link
-3. Allowlist rule: emails matching `CF_ACCESS_ALLOWED_EMAILS` (see
-   `../../deployments/env.example`).
-
-Until that step is done the `/api/*` routes will accept anonymous traffic,
-which is fine for Phase 1 (the routes are 501-only anyway).
+access apps on behalf of a zone. Until that step is done the `/api/*`
+routes will accept anonymous traffic (only the unauthenticated
+`/api/keys/register` will succeed; everything else requires a JWT).
 
 ## Local dev
 

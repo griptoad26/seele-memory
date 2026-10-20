@@ -1,0 +1,21 @@
+{
+  "name": "seele-memory-worker",
+  "version": "0.2.0",
+  "description": "Cloudflare Worker implementing the seele-cloud memory backend. See ../SPEC.md for the full contract.",
+  "main": "src/index.js",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "deploy": "wrangler deploy",
+    "deploy:secret": "wrangler secret put GRANT_JWT",
+    "tail": "wrangler tail"
+  },
+  "dependencies": {
+    "jose": "^6.2.12"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.7"
+  }
+}

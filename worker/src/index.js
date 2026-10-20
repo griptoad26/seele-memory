@@ -1,7 +1,7 @@
 /**
  * src/index.js — seele-cloud Cloudflare Worker
  *
- * TASK-seele-cloud-20261019-092.
+ * TASK-seele-cloud-20261019-093.
  *
  * This Worker serves two co-resident responsibilities:
  *
@@ -30,7 +30,7 @@
 // ---------------------------------------------------------------------------
 
 const SERVICE = 'seele-cloud';
-const VERSION = '0.1.0-phase1';
+const VERSION = '0.2.0-phase2';
 
 // ---------------------------------------------------------------------------
 // CORS
@@ -143,7 +143,7 @@ async function handleHealth(request, env) {
     ok: true,
     service: SERVICE,
     version: VERSION,
-    phase: 1,
+    phase: 2,
     environment: env.ENVIRONMENT || 'unknown',
     checks,
     // Contract per SPEC.md: "Status: { ok, version, last_reindex_at }"
@@ -153,42 +153,27 @@ async function handleHealth(request, env) {
 }
 
 // ---------------------------------------------------------------------------
-// Placeholders for later phases — explicit 501 so callers know it's
-// planned-but-unshipped rather than missing.
+// Generic handler dispatcher.
+//
+// Each route module returns `{ status, body }`; we turn that into a Response
+// here. Centralizing the JSON envelope makes CORS + version headers
+// uniform across the surface and means individual handlers never need to
+// touch Response objects.
 // ---------------------------------------------------------------------------
 
-const PLANNED = {
-  '/api/sync/devices': 'POST — register device under user_id (Phase 2)',
-  '/api/sync/upload': 'POST — upload one encrypted envelope (Phase 2)',
-  '/api/sync/download': 'GET — latest envelope for device (Phase 2)',
-  '/api/sync/state': 'GET — user sync state, cursors (Phase 2)',
-  '/mem/v1/recall': 'POST — top-K encrypted snippets via Vectorize (Phase 4)',
-  '/mem/v1/full-recall': 'POST — full decrypted payloads w/ grant JWT (Phase 4)',
-  '/api/keys/{user_id}/register': 'POST — first-time key registration (Phase 2)',
-  '/api/keys/{user_id}/recover': 'POST — re-derive from BIP-39 (Phase 2)',
-  '/api/bots': 'POST — create bot w/ scoped keypair (Phase 4)',
-};
-
-function handlePlanned(request, env, path) {
-  const route = Object.keys(PLANNED).find((k) => {
-    const stem = k
-      .replace('{user_id}', '')
-      .replace('{bot_id}', '');
-    return path === k || path.startsWith(stem);
-  });
-  return json(
-    request,
-    env,
-    {
-      error: 'not_implemented',
-      phase: 1,
-      path,
-      planned: route ? PLANNED[route] : null,
-      message:
-        'seele-cloud is at Phase 1. See SPEC.md for the phased rollout.',
-    },
-    501
-  );
+async function dispatch(request, env, handler) {
+  try {
+    const r = await handler(request, env);
+    return json(request, env, r.body || {}, r.status || 200);
+  } catch (err) {
+    return json(request, env, {
+      ok: false,
+      service: SERVICE,
+      version: VERSION,
+      error: 'internal_error',
+      message: String((err && err.message) || err),
+    }, 500);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -273,45 +258,84 @@ export default {
       });
     }
 
+    // ----- Health --------------------------------------------------------
+    if (path === '/api/mem/health' || path === '/health') {
+      return await handleHealth(request, env);
+    }
+
+    // ----- seele-fresh co-resident proxy (explicit mount) ---------------
+    if (path === '/fresh' || path.startsWith('/fresh/')) {
+      return await handleFreshProxy(request, env, url);
+    }
+
     try {
-      // --- Health (Phase 1 acceptance criterion) ---
-      if (path === '/api/mem/health' || path === '/health') {
-        return await handleHealth(request, env);
+      // ----- Auth: device registration (open) ---------------------------
+      if (path === '/api/keys/register' && request.method === 'POST') {
+        const { handleRegisterDevice } = await import('./keys.js');
+        return await dispatch(request, env, handleRegisterDevice);
       }
 
-      // --- seele-fresh co-resident proxy (explicit mount) ---
-      if (path === '/fresh' || path.startsWith('/fresh/')) {
-        return await handleFreshProxy(request, env, url);
+      // ----- Bots: POST /api/bots ----------------------------------------
+      if (path === '/api/bots' && request.method === 'POST') {
+        const { handleCreateBot } = await import('./bots.js');
+        return await dispatch(request, env, (req, env_) => handleCreateBot(req, env_, null));
+      }
+      if (path === '/api/bots' && request.method === 'GET') {
+        const { handleListBots } = await import('./bots.js');
+        return await dispatch(request, env, handleListBots);
       }
 
-      // --- Planned API surface (501 with the phase roadmap) ---
-      if (
-        path.startsWith('/api/sync/') ||
-        path.startsWith('/mem/v1/') ||
-        path.startsWith('/api/keys/') ||
-        path.startsWith('/api/bots')
-      ) {
-        return handlePlanned(request, env, path);
+      // ----- Bots: POST /api/bots/:id/revoke -----------------------------
+      // Pattern: /api/bots/<bot_id>/revoke. We avoid a router lib; the
+      // shape is small enough to parse inline.
+      const revokeMatch = /^\/api\/bots\/([A-Za-z0-9_-]+)\/revoke\/?$/.exec(path);
+      if (revokeMatch && request.method === 'POST') {
+        const bot_id = revokeMatch[1];
+        const { handleRevokeBot } = await import('./bots.js');
+        return await dispatch(request, env, (req, env_) => handleRevokeBot(req, env_, bot_id));
       }
 
-      // --- Everything else: static origin (GitHub Pages) ---
+      // ----- Recall: POST /mem/v1/recall --------------------------------
+      if (path === '/mem/v1/recall' && request.method === 'POST') {
+        const { handleRecall } = await import('./recall.js');
+        return await dispatch(request, env, handleRecall);
+      }
+      if (path === '/mem/v1/full-recall' && request.method === 'POST') {
+        const { handleFullRecall } = await import('./recall.js');
+        return await dispatch(request, env, handleFullRecall);
+      }
+
+      // ----- Sync: POST /api/sync/upload ---------------------------------
+      if (path === '/api/sync/upload' && request.method === 'POST') {
+        const { handleSyncUpload } = await import('./sync.js');
+        return await dispatch(request, env, handleSyncUpload);
+      }
+      if (path === '/api/sync/download' && request.method === 'POST') {
+        const { handleSyncDownload } = await import('./sync.js');
+        return await dispatch(request, env, handleSyncDownload);
+      }
+      if (path === '/api/sync/state' && request.method === 'GET') {
+        const { handleSyncState } = await import('./sync.js');
+        return await dispatch(request, env, handleSyncState);
+      }
+      if (path === '/api/sync/devices' && request.method === 'GET') {
+        const { handleSyncDevices } = await import('./sync.js');
+        return await dispatch(request, env, handleSyncDevices);
+      }
+
+      // ----- Everything else: static origin (GitHub Pages) --------------
       // Matches seele.agency's pre-existing behavior. Requests to the
       // root and unknown paths are served by the origin with cache-
       // busting headers so first-time visitors still get fresh content.
       return await handleFreshProxy(request, env, url);
     } catch (err) {
-      return json(
-        request,
-        env,
-        {
-          ok: false,
-          service: SERVICE,
-          version: VERSION,
-          error: 'internal_error',
-          message: String((err && err.message) || err),
-        },
-        500
-      );
+      return json(request, env, {
+        ok: false,
+        service: SERVICE,
+        version: VERSION,
+        error: 'internal_error',
+        message: String((err && err.message) || err),
+      }, 500);
     }
   },
 };
