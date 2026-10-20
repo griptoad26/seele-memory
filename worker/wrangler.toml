@@ -1,13 +1,55 @@
+# wrangler.toml — seele-cloud Cloudflare Worker config.
+#
+# TASK-seele-cloud-20261019-092 (Phase 1).
+#
+# Deploy:  wrangler deploy
+# Migrate: wrangler d1 execute seele-memory-db --remote --file=migrations/0001_initial.sql
+#
+# Resource names per SPEC.md and the dispatch brief:
+#   * D1 database    → seele-memory-db
+#   * Vectorize index → seele-memory-embeddings (384d cosine; matches
+#                       @xenova/all-MiniLM-L6-v2, the default embedding
+#                       candidate documented in SPEC.md §Open Questions)
+#
+# NOTE: database_id is a placeholder until `wrangler d1 create seele-memory-db`
+# returns a real ID. The same applies if Vectorize is provisioned via the
+# dashboard rather than the CLI — see worker/scripts/provision.sh --apply.
+
 name = "seele-memory"
 main = "src/index.js"
-compatibility_date = "2026-10-19"
+compatibility_date = "2026-10-01"
 
-# Phase 1 bindings — populated as TASK-092 lands
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "seele-memory-db"
-# database_id = "TBD"
+# Deploy to the seele.agency zone via a broad route pattern. The router
+# inside the Worker dispatches /api/* + /mem/* + /fresh/* explicitly and
+# falls through to the seele-fresh cache-busting proxy for everything
+# else (preserving seele.agency's pre-existing static behavior).
+routes = [
+  { pattern = "seele.agency/*", zone_name = "seele.agency" }
+]
 
-# [[vectorize]]
-# binding = "VEC"
-# index_name = "seele-memory-vec"
+# --- Bindings ---------------------------------------------------------------
+
+[[d1_databases]]
+binding = "DB"
+database_name = "seele-memory-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+# Vectorize has no migration system in wrangler.toml today; provision with
+# `wrangler vectorize create seele-memory-embeddings --dimensions=384 --metric=cosine`.
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "seele-memory-embeddings"
+
+# --- Vars -------------------------------------------------------------------
+
+[vars]
+ENVIRONMENT = "production"
+ORIGIN_URL = "https://griptoad26.github.io"
+CORS_ALLOWED_ORIGINS = "https://seele.agency,http://localhost:3000,http://localhost:8090"
+LAST_REINDEX_AT = ""
+
+# Built-in observability — health-check errors are noisy in dev,
+# enabled in production so we can alert on /api/mem/health 5xx.
+[observability]
+enabled = true
