@@ -1,0 +1,19 @@
+{
+  "name": "@seele/example-langchain",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LangChain JS bridge for @seele/memory-client. Drop-in VectorStore for RetrievalQAChain over encrypted seele-cloud recall.",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@seele/memory-client": "^0.1.0",
+    "@langchain/openai": "^0.2.0",
+    "langchain": "^0.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.0"
+  }
+}

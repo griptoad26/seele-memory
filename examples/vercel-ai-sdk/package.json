@@ -1,0 +1,25 @@
+{
+  "name": "@seele/example-vercel-ai-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal Vercel AI SDK route handler that uses @seele/memory-client for encrypted RAG over seele-cloud.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@seele/memory-client": "^0.1.0",
+    "ai": "^3.0.0",
+    "next": "^14.2.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "@ai-sdk/openai": "^0.0.40",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.2.0",
+    "typescript": "^5.4.0"
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "name": "seele-recall",
+  "description": "Search the user's seele-memory encrypted corpus and decrypt snippets locally before returning them as RAG context. Privacy: only embedding vectors + ciphertext leave the bot's host.",
+  "version": "0.1.0",
+  "inputs": {
+    "query": {
+      "type": "string",
+      "description": "Plaintext question. Sent to @seele/memory-client to embed; the *plaintext* never leaves the bot host."
+    },
+    "top_k": {
+      "type": "integer",
+      "description": "How many snippets to retrieve (1-50). Default 5.",
+      "required": false
+    }
+  },
+  "outputs": {
+    "snippets": {
+      "type": "array",
+      "description": "Decrypted plaintext snippets, ready to use as conversation context."
+    },
+    "query_id": {
+      "type": "string",
+      "description": "Server-side correlation id for this recall call."
+    }
+  },
+  "secrets": [
+    "SEELE_BASE_URL",
+    "SEELE_BOT_JWT",
+    "SEELE_AES_KEY_B64"
+  ],
+  "notes": [
+    "This action runs in the user's Python/JavaScript runtime that proxies Claude's tool call.",
+    "The bot grant JWT (SEELE_BOT_JWT) is minted out-of-band via `POST /api/bots` and expires in 15min; refresh when near expiry.",
+    "SEELE_AES_KEY_B64 is the user's AES-256 content key in base64. Derived once from their 12-word recovery phrase; do not log it.",
+    "Replace the placeholder values with your own. Do NOT commit real tokens."
+  ],
+  "code": {
+    "language": "javascript",
+    "body": "// This script body runs in the user's bot host (Claude Custom Action sandbox).\n// It assumes `@seele/memory-client` is installed in the project root.\n\nimport {\n  hashEmbedder384,\n  sealWithContentKey,\n  openWithContentKey,\n  base64ToBytes,\n} from '@seele/memory-client'\n\n// 1. Read secrets from the runtime environment.\nconst baseUrl = process.env.SEELE_BASE_URL || 'https://seele-memory.griptoad.workers.dev'\nconst botJwt = process.env.SEELE_BOT_JWT\nconst aesKeyB64 = process.env.SEELE_AES_KEY_B64\nif (!botJwt) throw new Error('SEELE_BOT_JWT is required (mint via POST /api/bots)')\nif (!aesKeyB64) throw new Error('SEELE_AES_KEY_B64 is required (derive from your 12-word phrase)')\n\nconst aesKey = base64ToBytes(aesKeyB64)\n\n// 2. Embed the query on-device. The plaintext leaves the host only as a vector.\nconst vec = await hashEmbedder384(inputs.query)\nconst query_vector = Array.from(vec) // Float32Array → number[] for JSON\n\n// 3. Recall: bot JWT in Authorization header, query_vector in body, no plaintext query.\nconst resp = await fetch(`${baseUrl}/mem/v1/recall`, {\n  method: 'POST',\n  headers: {\n    'content-type': 'application/json',\n    authorization: `Bearer ${botJwt}`,\n  },\n  body: JSON.stringify({\n    query_vector,\n    top_k: inputs.top_k || 5,\n  }),\n})\nif (!resp.ok) {\n  const err = await resp.json().catch(() => ({}))\n  throw new Error(`recall failed: ${resp.status} ${err.error || ''} ${err.message || ''}`)\n}\nconst { snippets, query_id } = await resp.json()\n\n// 4. Decrypt each snippet locally. Server cannot open these — only we have the key.\nconst decrypted = await Promise.all(\n  snippets.map(async (s) => {\n    const ciphertext = base64ToBytes(s.body_encrypted)\n    const plaintext = await openWithContentKey(aesKey, ciphertext)\n    return {\n      chunk_id: s.chunk_id,\n      score: s.score,\n      created_at: s.created_at,\n      text: new TextDecoder().decode(plaintext),\n    }\n  }),\n)\n\nreturn { snippets: decrypted, query_id }\n"
+  },
+  "sample_conversation": {
+    "messages": [
+      {
+        "role": \"user\",
+        \"content": \"what did I decide about rust 2024?\"
+      },
+      {
+        "role\": \"assistant",
+        "tool_calls": [
+          {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+              "name": "seele-recall",
+              "arguments": "{\"query\":\"rust 2024 decisions\",\"top_k\":3}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": "{\"snippets\":[{\"chunk_id\":\"c1\",\"score\":0.91,\"created_at\":1700000000000,\"text\":\"decided to ship Rust 2024 by Q3; using sealevel-rs for the runtime, candle for embeddings. confirmed in 2026-09-12 thread.\"},{\"chunk_id\":\"c2\",\"score\":0.84,\"created_at\":1701000000000,\"text\":\"follow-up: postpone rust 2024 if cluster-hub work slips beyond oct 15.\"}],\"query_id\":\"q-20261019-001\"}"
+      },
+      {
+        "role": "assistant",
+        "content": "You decided to ship Rust 2024 by Q3, using sealevel-rs for the runtime and candle for embeddings (thread 2026-09-12), with a fall-back to postpone if cluster-hub work slips past Oct 15."
+      }
+    ]
+  }
+}

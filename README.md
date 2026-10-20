@@ -11,16 +11,16 @@ See [`SPEC.md`](./SPEC.md) for the full design.
 
 ## Status
 
-**Pre-implementation.** v0.10.0 milestone just kicked off. Task tracking lives in the OCMI hub.
+v0.10.0 milestone under active build.
 
 | Track | Status |
 |---|---|
 | SPEC.md v0.1 | ✅ shipped |
-| CF Worker + D1 + Vectorize | 🚧 in progress (TASK-092) |
-| Recall API + bot JWT | ⛔ blocked on 092 (TASK-093) |
+| CF Worker + D1 + Vectorize | ✅ shipped (v0.2.0-phase2) |
+| Recall API + bot JWT | ✅ shipped (TASK-093) |
+| `@seele/memory-client` npm SDK | ✅ shipped (TASK-096) |
 | xkg-core SyncTarget::SeeleCloud | 🚧 in progress (TASK-094) |
 | Flutter sync target picker | ⛔ blocked on 094 (TASK-095) |
-| `@seele/memory-client` npm SDK | ⛔ blocked on 093 (TASK-096) |
 
 ## Architecture (TL;DR)
 
@@ -36,10 +36,74 @@ See [`SPEC.md`](./SPEC.md) for the full design.
 seele-memory/
 ├── SPEC.md                          ← the contract
 ├── worker/                          CF Worker (src/, test/, migrations/)
-├── sdk/                             Client SDKs (TypeScript, Python)
+├── sdk/
+│   └── typescript/                  @seele/memory-client (npm)
+│       ├── src/
+│       ├── test/                    vitest suite
+│       ├── package.json
+│       └── README.md
 ├── examples/                        Claude / Vercel AI SDK / LangChain
-├── docs/                            USER_GUIDE, SECURITY_MODEL, API_REFERENCE
+├── docs/                            architecture, embedding, self-host, security model
 ├── deployments/                     wrangler deploy + env.example
 ├── README.md
 └── LICENSE                          MIT
 ```
+
+## Using the SDK
+
+If you're building a bot that wants to recall from a user's seele-memory
+corpus, the package is on npm as `@seele/memory-client`.
+
+```bash
+npm install @seele/memory-client
+```
+
+Documentation:
+- SDK reference: [`sdk/typescript/README.md`](./sdk/typescript/README.md)
+- Architecture: [`docs/architecture.md`](./docs/architecture.md)
+- Embedding integration (replace the default stub with a real model):
+  [`docs/embedding.md`](./docs/embedding.md)
+- Self-hosting the Worker: [`docs/self-host.md`](./docs/self-host.md)
+
+Examples:
+- Claude Custom Action: [`examples/claude-custom-action.json`](./examples/claude-custom-action.json)
+- Vercel AI SDK: [`examples/vercel-ai-sdk/`](./examples/vercel-ai-sdk)
+- LangChain: [`examples/langchain/`](./examples/langchain)
+
+The quick-start (browser):
+
+```ts
+import {
+  generateRecoveryPhrase,
+  deriveKeyMaterial,
+  SeeleCloudClient,
+} from '@seele/memory-client'
+
+const phrase = await generateRecoveryPhrase()
+const keys = deriveKeyMaterial(phrase)
+
+const client = new SeeleCloudClient({
+  baseUrl: 'https://seele-memory.griptoad.workers.dev',
+  deviceToken: '...', // from POST /api/keys/register
+})
+
+const session = await client.openBot({ name: 'claude' })
+const { snippets } = await session.recall({ query: 'rust 2024 decisions', top_k: 5 })
+
+// snippets[i].body_encrypted is ciphertext. Decrypt with keys.plaintextAesKey().
+```
+
+## Privacy model (TL;DR)
+
+- The server holds ciphertext blobs and 384-dim embedding vectors.
+- The server never sees your 12-word recovery phrase, your AES content
+  key, your Ed25519 private key, or the plaintext of any query.
+- Decryption happens on your device, in the bot's runtime, using a key
+  derived from your phrase.
+- The default embedder in the SDK is shape-correct but **not semantic** —
+  swap it for `onnxruntime-web` + `bge-small-en-v1.5` (or your remote
+  embedder) before shipping a bot. See `docs/embedding.md`.
+
+For the full threat model read [`docs/architecture.md`](./docs/architecture.md)
+and [`docs/SECURITY_MODEL.md`](./docs/SECURITY_MODEL.md).
+
