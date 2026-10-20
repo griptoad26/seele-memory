@@ -27,9 +27,16 @@ compatibility_date = "2026-10-01"
 # two responsibilities share one Worker. Anything under /fresh/* not
 # explicitly handled by seele-cloud is proxied upstream; everything
 # else on seele.agency continues to be served by the existing Worker.
+#
+# /fresh/* must be registered explicitly: Cloudflare only invokes a
+# Worker for URL patterns that match a route. Without this third
+# pattern the proxy code still ships co-resident (and does execute on
+# /api/* and /mem/* fall-through), but https://<worker>/fresh/ would
+# never reach the Worker at all and would 404 at the edge.
 routes = [
   { pattern = "seele.agency/api/*", zone_name = "seele.agency" },
-  { pattern = "seele.agency/mem/*", zone_name = "seele.agency" }
+  { pattern = "seele.agency/mem/*", zone_name = "seele.agency" },
+  { pattern = "seele.agency/fresh/*", zone_name = "seele.agency" }
 ]
 
 # --- Bindings ---------------------------------------------------------------
