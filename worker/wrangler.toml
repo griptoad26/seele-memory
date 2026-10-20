@@ -19,12 +19,16 @@ name = "seele-memory"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
 
-# Deploy to the seele.agency zone via a broad route pattern. The router
-# inside the Worker dispatches /api/* + /mem/* + /fresh/* explicitly and
-# falls through to the seele-fresh cache-busting proxy for everything
-# else (preserving seele.agency's pre-existing static behavior).
+# Two specific route patterns so this Worker coexists with the existing
+# seele-fresh cache-busting Worker on the same zone. The router inside
+# the Worker handles /api/* + /mem/* explicitly and also handles the
+# catch-all /fresh/* (a pointer for the cache-busting proxy), so the
+# two responsibilities share one Worker. Anything under /fresh/* not
+# explicitly handled by seele-cloud is proxied upstream; everything
+# else on seele.agency continues to be served by the existing Worker.
 routes = [
-  { pattern = "seele.agency/*", zone_name = "seele.agency" }
+  { pattern = "seele.agency/api/*", zone_name = "seele.agency" },
+  { pattern = "seele.agency/mem/*", zone_name = "seele.agency" }
 ]
 
 # --- Bindings ---------------------------------------------------------------
