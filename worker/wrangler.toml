@@ -1,0 +1,13 @@
+name = "seele-memory"
+main = "src/index.js"
+compatibility_date = "2026-10-19"
+
+# Phase 1 bindings — populated as TASK-092 lands
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "seele-memory-db"
+# database_id = "TBD"
+
+# [[vectorize]]
+# binding = "VEC"
+# index_name = "seele-memory-vec"
