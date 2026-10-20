@@ -236,7 +236,14 @@ Vectorize binding handles similarity search over the `embedding` vectors. D1 han
 
 ## Repo layout
 
-**New repo:** `github.com/griptoad26/seele-memory`
+**New repo:** `github.com/griptoad26/seele-memory` (PRIVATE — see decision 2026-10-19)
+
+> **Visibility decision (user-issued, post-draft):** repo is **private** to keep
+> crypto code, schema, and threat-model reasoning off public surfaces. The
+> `@seele/memory-client` npm package ships **publicly** as the SDK API surface
+> (no server-side code in the artifact). CF Worker deploys from private repo
+> via Cloudflare GitHub integration. User-facing docs (security model, recall
+> API) land at `seele.agency/docs/*` post-launch as a separate public surface.
 
 ```
 seele-memory/
