@@ -270,6 +270,34 @@ This is the strongest argument for the fix in Finding 1: **tokens are not
 revocable.** Any token ever minted by that endpoint stays valid for a year regardless
 of what is done to the Access policy afterwards.
 
+### RESOLVED in TASK-seele-cloud-20261022-101
+
+Finding 1 is now fixed in code, and the probe rows have been cleaned up. What landed:
+
+| Change | Where |
+|---|---|
+| `POST /api/keys/register` returns 401 without `cf-access-authenticated-user-email` | `src/keys.js` `accessIdentity()` |
+| Body `user_id` is ignored; identity is `sha256(lowercased email)` | `src/keys.js` `handleRegisterDevice` |
+| Device token `sub` is the Access-derived id, so it cannot be minted for another tenant | `src/keys.js` `signGrant({ sub: user_id })` |
+| `POST /api/keys/revoke` — tombstones a device | `src/keys.js` `handleRevokeDevice`, route in `src/index.js` |
+| `verifyGrant` rejects tokens whose device is revoked **or unknown** | `src/auth.js`, `src/db.js` `checkDeviceRevoked` |
+| `db: env.DB` now passed by all four `/api/sync/*` verifyGrant calls (they previously passed none, so no revocation check could run) | `src/sync.js` |
+| `devices.revoked_at` column | `migrations/0003_device_revocation.sql` |
+
+Two things worth knowing if you read the code later:
+
+1. **The revocation check needs `db`.** All four sync routes previously omitted it with
+   the comment "no db cross-check: device grants would fail". That comment described the
+   old behaviour where device grants skipped the check entirely. It has been removed —
+   device grants now cross-check the devices table.
+2. **Revocation tombstones rather than deletes.** `conversations` has a composite FK to
+   `devices(user_id, device_id)` and `encrypted_chunks` cascades off `conversations`, so
+   a DELETE would either be rejected by FK enforcement or silently take the user's sync
+   history with it. `revoked_at IS NULL` means active, matching `bots.revoked_at`.
+
+The Access dashboard change (below) is still required — the code fix assumes Access is
+actually attached to the hostname, and the header is what it trusts.
+
 ---
 
 ## Also worth correcting

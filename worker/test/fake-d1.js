@@ -321,8 +321,16 @@ function parseUpdateSet(part) {
       const idx = parseInt((/EXCLUDED\.([A-Za-z_]+)/i.exec(expr) || [])[1], 10);
       out.push({ col, target: col, expr: 'excluded', paramIdx: -1, excludedCol: idx });
     } else {
-      const idx = parseInt((/\?(\d+)/.exec(expr) || [null, '1'])[0]);
-      out.push({ col, idx: isNaN(idx) ? 1 : idx - 1 });
+      // Extract the positional placeholder (e.g. `?1`) and map it to the
+      // zero-based bind position. The previous version did
+      // parseInt(/\?(\d+)/.exec(expr)[0]), i.e. parseInt("?1") -> NaN,
+      // then fell through to `idx - 1` = 0 for EVERY assignment. That
+      // silently bound the first parameter to every SET column, so
+      // `SET revoked_at = ?1 WHERE device_id = ?2` wrote device_id's
+      // value into revoked_at. Use the capture group (the digits).
+      const pm = /\?(\d+)/.exec(expr);
+      const pos = pm ? parseInt(pm[1], 10) : 1;
+      out.push({ col, idx: Math.max(0, pos - 1) });
     }
   }
   // For EXCLUDED updates, paramIdx corresponds to the bind position

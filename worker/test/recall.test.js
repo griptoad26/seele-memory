@@ -24,7 +24,7 @@
 import { describe, it, expect } from 'vitest';
 import { handleRecall, handleFullRecall } from '../src/recall.js';
 import { handleSyncUpload, handleSyncDownload } from '../src/sync.js';
-import { handleRegisterDevice } from '../src/keys.js';
+import { loginAs } from './helpers.js';
 import { signGrant, SCOPE_WRITE, SCOPE_RECALL } from '../src/auth.js';
 import { FakeD1 } from './fake-d1.js';
 import { FakeVectorize } from './fake-vectorize.js';
@@ -46,16 +46,8 @@ function makeEnv() {
 }
 
 async function register(env, user_id, device_id) {
-  const req = new Request('https://test/api/keys/register', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      user_id,
-      device: { device_id, name: user_id + '-d', platform: 'linux', app_version: '0.10.0' },
-    }),
-  });
-  const r = await handleRegisterDevice(req, env);
-  return r.body.device_token;
+  const r = await loginAs(env, `${user_id}@example.com`, device_id);
+  return r.token;
 }
 
 async function authReq(url, method, token, body) {

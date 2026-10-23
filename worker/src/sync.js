@@ -72,7 +72,9 @@ export async function handleSyncUpload(request, env) {
     secret: env.GRANT_JWT,
     authorization: request.headers.get('Authorization'),
     required_scope: SCOPE_WRITE,
-    // No db cross-check: device grants (bot_id = device_id) would fail.
+    // Cross-check the device row so a revoked device's token stops
+    // working immediately, rather than living out its 365-day TTL.
+    db: env.DB,
   });
   if (!auth.ok) {
     return { status: auth.error.status, body: { error: auth.error.code, message: auth.error.message } };
@@ -228,6 +230,7 @@ export async function handleSyncDownload(request, env) {
     secret: env.GRANT_JWT,
     authorization: request.headers.get('Authorization'),
     required_scope: SCOPE_RECALL, // reading your own data
+    db: env.DB,
   });
   if (!auth.ok) {
     return { status: auth.error.status, body: { error: auth.error.code, message: auth.error.message } };
@@ -316,6 +319,7 @@ export async function handleSyncState(request, env) {
     secret: env.GRANT_JWT,
     authorization: request.headers.get('Authorization'),
     required_scope: SCOPE_RECALL,
+    db: env.DB,
   });
   if (!auth.ok) {
     return { status: auth.error.status, body: { error: auth.error.code, message: auth.error.message } };
@@ -350,6 +354,7 @@ export async function handleSyncDevices(request, env) {
     secret: env.GRANT_JWT,
     authorization: request.headers.get('Authorization'),
     required_scope: SCOPE_RECALL,
+    db: env.DB,
   });
   if (!auth.ok) {
     return { status: auth.error.status, body: { error: auth.error.code, message: auth.error.message } };

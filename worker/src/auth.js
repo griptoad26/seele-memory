@@ -33,6 +33,7 @@
  */
 
 import { jwtVerify, SignJWT } from 'jose';
+import { checkDeviceRevoked } from './db.js';
 
 // ---------------------------------------------------------------------------
 // Scope constants — kept here so handlers can reference them without
@@ -219,21 +220,43 @@ export async function verifyGrant({ secret, authorization, required_scope, db })
   // Optional revocation check against D1. If no binding is supplied
   // (tests, or the route doesn't need cross-row context), skip this.
   //
-  // Device grants (issuer = 'seele-cloud:device') carry bot_id = device_id
-  // and have no row in the bots table — we treat them as not-revoked and
-  // trust the JWT expiry alone. Revoking a device means rotating the
-  // device token, which is out of scope for the auth middleware.
-  if (db && payload.iss !== 'seele-cloud:device') {
-    const revoked = await checkRevoked(db, payload.bot_id, payload.sub);
-    if (revoked) {
-      return {
-        ok: false,
-        error: authError(
-          'bot_revoked',
-          `bot ${payload.bot_id} has been revoked or does not belong to ${payload.sub}`,
-          403,
-        ),
-      };
+  // Two grant families:
+  //
+  //   * bot grants (iss != 'seele-cloud:device'): cross-check the bot
+  //     row against the JWT's sub and revoked_at.
+  //
+  //   * device grants (iss == 'seele-cloud:device'): bot_id IS the
+  //     device_id. These used to be waved through entirely ("revoking a
+  //     device means rotating the token") — which, combined with a
+  //     365-day TTL, meant a leaked device token was permanent. Now that
+  //     POST /api/keys/revoke exists, we cross-check the device row the
+  //     same way. This requires `db` to be passed in; the sync routes
+  //     pass env.DB (see the "no db cross-check" note removed below).
+  if (db) {
+    if (payload.iss === 'seele-cloud:device') {
+      const revoked = await checkDeviceRevoked(db, payload.bot_id, payload.sub);
+      if (revoked) {
+        return {
+          ok: false,
+          error: authError(
+            'device_revoked',
+            `device ${payload.bot_id} is revoked or does not belong to ${payload.sub}`,
+            401,
+          ),
+        };
+      }
+    } else {
+      const revoked = await checkRevoked(db, payload.bot_id, payload.sub);
+      if (revoked) {
+        return {
+          ok: false,
+          error: authError(
+            'bot_revoked',
+            `bot ${payload.bot_id} has been revoked or does not belong to ${payload.sub}`,
+            403,
+          ),
+        };
+      }
     }
   }
 

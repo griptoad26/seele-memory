@@ -17,7 +17,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { handleSyncUpload, handleSyncDownload, handleSyncState, handleSyncDevices } from '../src/sync.js';
-import { handleRegisterDevice } from '../src/keys.js';
+import { loginAs, userIdFor } from './helpers.js';
 import { signGrant, SCOPE_WRITE, SCOPE_RECALL } from '../src/auth.js';
 import { FakeD1 } from './fake-d1.js';
 import { FakeVectorize } from './fake-vectorize.js';
@@ -39,21 +39,10 @@ function b64(bytes) {
 }
 
 async function registerDevice(env, user_id, device_id) {
-  const req = new Request('https://test/api/keys/register', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      user_id,
-      device: {
-        device_id,
-        name: 'test-device',
-        platform: 'linux',
-        app_version: '0.10.0-test',
-      },
-    }),
-  });
-  const r = await handleRegisterDevice(req, env);
-  return r.body.device_token;
+  // Identity derives from the Access email, not from user_id. The
+  // returned token's sub is sha256('<user_id>@example.com').
+  const r = await loginAs(env, `${user_id}@example.com`, device_id);
+  return r.token;
 }
 
 async function makeAuthedRequest(url, method, token, body) {
@@ -240,7 +229,7 @@ describe('GET /api/sync/state', () => {
     });
     const r = await handleSyncState(req, env);
     expect(r.status).toBe(200);
-    expect(r.body.user_id).toBe('u1');
+    expect(r.body.user_id).toBe(await userIdFor('u1@example.com'));
     expect(r.body.device_id).toBe('d1');
     expect(r.body.conv_count).toBe(1);
     expect(r.body.chunk_count).toBe(1);

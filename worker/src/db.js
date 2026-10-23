@@ -149,6 +149,60 @@ export async function listDevices(db, user_id) {
   return res.results || [];
 }
 
+/**
+ * Mark a device revoked (idempotent, ownership-scoped).
+ *
+ * We set `revoked_at` rather than deleting the row: the conversations
+ * and encrypted_chunks rows carry a composite FK to
+ * devices(user_id, device_id), so a delete would either fail on FK
+ * enforcement or silently orphan sync history. A tombstone keeps the
+ * referential graph intact while making the token unusable.
+ *
+ * Returns `{ revoked: true, revoked_at }` when this call flipped a live
+ * row, else `{ revoked: false }` (unknown device, other owner, or
+ * already revoked).
+ *
+ * @param {D1Database} db
+ * @param {{ user_id: string, device_id: string }} d
+ */
+export async function revokeDevice(db, d) {
+  const at = Date.now();
+  const res = await db
+    .prepare(
+      `UPDATE devices SET revoked_at = ?1
+        WHERE device_id = ?2 AND user_id = ?3 AND revoked_at IS NULL`
+    )
+    .bind(at, d.device_id, d.user_id)
+    .run();
+  const changed = res && res.meta && typeof res.meta.changes === 'number'
+    ? res.meta.changes
+    : 0;
+  if (!changed) return { revoked: false };
+  return { revoked: true, revoked_at: at };
+}
+
+/**
+ * Is this device_id currently revoked (or unknown to this owner)?
+ *
+ * Called by verifyGrant for device grants. A device that does not exist
+ * for this user is treated as revoked — fail closed, so a token for a
+ * purged row doesn't stay live.
+ *
+ * @param {D1Database} db
+ * @param {string} device_id
+ * @param {string} user_id
+ * @returns {Promise<boolean>} true if the token must be rejected
+ */
+export async function checkDeviceRevoked(db, device_id, user_id) {
+  const row = await db
+    .prepare('SELECT user_id, revoked_at FROM devices WHERE device_id = ?1')
+    .bind(device_id)
+    .first();
+  if (!row) return true;
+  if (row.user_id !== user_id) return true;
+  return row.revoked_at != null;
+}
+
 // ---------------------------------------------------------------------------
 // Conversations
 // ---------------------------------------------------------------------------

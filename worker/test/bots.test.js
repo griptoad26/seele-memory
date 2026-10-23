@@ -10,7 +10,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { handleCreateBot, handleListBots, handleRevokeBot } from '../src/bots.js';
-import { handleRegisterDevice } from '../src/keys.js';
+import { loginAs, userIdFor } from './helpers.js';
 import { handleRecall } from '../src/recall.js';
 import { signGrant, verifyGrant, SCOPE_WRITE } from '../src/auth.js';
 import { FakeD1 } from './fake-d1.js';
@@ -26,17 +26,11 @@ function makeEnv() {
   };
 }
 
-async function register(env, user_id, device_id) {
-  const req = new Request('https://test/api/keys/register', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      user_id,
-      device: { device_id, name: user_id + '-d', platform: 'linux', app_version: '0.10.0' },
-    }),
-  });
-  const r = await handleRegisterDevice(req, env);
-  return r.body.device_token;
+// `login` is the logical tenant name ('alice', 'bob'); the Worker derives
+// the real user_id from the Access email, so tests never hand-write one.
+async function login(env, login, device_id) {
+  const r = await loginAs(env, `${login}@example.com`, device_id);
+  return r.token;
 }
 
 async function authedReq(url, method, token, body) {
@@ -54,7 +48,7 @@ async function authedReq(url, method, token, body) {
 describe('POST /api/bots', () => {
   it('creates a bot, returns a grant JWT + private key', async () => {
     const env = makeEnv();
-    const token = await register(env, 'alice', 'd-a');
+    const token = await login(env, 'alice', 'd-a');
 
     const req = await authedReq('/api/bots', 'POST', token, {
       name: 'claude-assistant',
@@ -63,7 +57,7 @@ describe('POST /api/bots', () => {
     const r = await handleCreateBot(req, env, null);
     expect(r.status).toBe(200);
     expect(r.body.bot_id).toBeTypeOf('string');
-    expect(r.body.user_id).toBe('alice');
+    expect(r.body.user_id).toBe(await userIdFor('alice@example.com'));
     expect(r.body.name).toBe('claude-assistant');
     expect(r.body.scope_tags).toEqual(['decisions', 'rust-projects']);
     expect(r.body.grant.jwt).toBeTypeOf('string');
@@ -84,7 +78,7 @@ describe('POST /api/bots', () => {
 
   it('rejects a name-less body', async () => {
     const env = makeEnv();
-    const token = await register(env, 'alice', 'd-a');
+    const token = await login(env, 'alice', 'd-a');
 
     const r = await handleCreateBot(
       await authedReq('/api/bots', 'POST', token, { scope_tags: [] }),
@@ -111,7 +105,7 @@ describe('POST /api/bots', () => {
   it('rejects when GRANT_JWT secret is missing', async () => {
     const env = makeEnv();
     env.GRANT_JWT = undefined;
-    const token = await register(env, 'alice', 'd-a');
+    const token = await login(env, 'alice', 'd-a');
 
     const r = await handleCreateBot(
       await authedReq('/api/bots', 'POST', token, { name: 'x' }),
@@ -126,7 +120,7 @@ describe('POST /api/bots', () => {
 
   it('bot grant can call /mem/v1/recall', async () => {
     const env = makeEnv();
-    const token = await register(env, 'alice', 'd-a');
+    const token = await login(env, 'alice', 'd-a');
 
     const cr = await handleCreateBot(
       await authedReq('/api/bots', 'POST', token, { name: 'recall-bot' }),
@@ -148,8 +142,8 @@ describe('POST /api/bots', () => {
 describe('GET /api/bots', () => {
   it('lists only the caller\'s bots', async () => {
     const env = makeEnv();
-    const aTok = await register(env, 'alice', 'd-a');
-    const bTok = await register(env, 'bob', 'd-b');
+    const aTok = await login(env, 'alice', 'd-a');
+    const bTok = await login(env, 'bob', 'd-b');
 
     await handleCreateBot(await authedReq('/api/bots', 'POST', aTok, { name: 'a-1' }), env, null);
     await handleCreateBot(await authedReq('/api/bots', 'POST', aTok, { name: 'a-2' }), env, null);
@@ -171,7 +165,7 @@ describe('GET /api/bots', () => {
 describe('POST /api/bots/:id/revoke', () => {
   it('revokes the bot and invalidates its grant', async () => {
     const env = makeEnv();
-    const token = await register(env, 'alice', 'd-a');
+    const token = await login(env, 'alice', 'd-a');
     const cr = await handleCreateBot(
       await authedReq('/api/bots', 'POST', token, { name: 'doomed' }),
       env,
@@ -209,7 +203,7 @@ describe('POST /api/bots/:id/revoke', () => {
 
   it('returns 404 for an unknown bot', async () => {
     const env = makeEnv();
-    const token = await register(env, 'alice', 'd-a');
+    const token = await login(env, 'alice', 'd-a');
     const r = await handleRevokeBot(
       await authedReq('/api/bots/nonexistent/revoke', 'POST', token),
       env,
@@ -220,8 +214,8 @@ describe('POST /api/bots/:id/revoke', () => {
 
   it('returns 403 if the bot belongs to a different user', async () => {
     const env = makeEnv();
-    const aTok = await register(env, 'alice', 'd-a');
-    const bTok = await register(env, 'bob', 'd-b');
+    const aTok = await login(env, 'alice', 'd-a');
+    const bTok = await login(env, 'bob', 'd-b');
 
     const cr = await handleCreateBot(
       await authedReq('/api/bots', 'POST', aTok, { name: 'alice-only' }),
@@ -240,7 +234,7 @@ describe('POST /api/bots/:id/revoke', () => {
 
   it('is idempotent on a second revoke', async () => {
     const env = makeEnv();
-    const token = await register(env, 'alice', 'd-a');
+    const token = await login(env, 'alice', 'd-a');
     const cr = await handleCreateBot(
       await authedReq('/api/bots', 'POST', token, { name: 'x' }),
       env,

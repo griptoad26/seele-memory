@@ -269,10 +269,18 @@ export default {
     }
 
     try {
-      // ----- Auth: device registration (open) ---------------------------
+      // ----- Auth: device registration (Access-gated) -------------------
       if (path === '/api/keys/register' && request.method === 'POST') {
         const { handleRegisterDevice } = await import('./keys.js');
         return await dispatch(request, env, handleRegisterDevice);
+      }
+
+      // ----- Auth: device revocation (Access-gated) ---------------------
+      // Exists so a leaked 365-day device token can be invalidated.
+      // Without this, revocation means "wait out the TTL".
+      if (path === '/api/keys/revoke' && request.method === 'POST') {
+        const { handleRevokeDevice } = await import('./keys.js');
+        return await dispatch(request, env, handleRevokeDevice);
       }
 
       // ----- Bots: POST /api/bots ----------------------------------------
