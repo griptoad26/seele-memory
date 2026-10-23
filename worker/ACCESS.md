@@ -262,9 +262,22 @@ Remove them with direct D1 access:
 
 ```bash
 wrangler d1 execute seele-memory-db --remote \
-  --command "DELETE FROM devices WHERE device_id LIKE 'probe-dev-%'; \
-             DELETE FROM users  WHERE user_id   LIKE 'attacker-probe-%';"
+  --command "DELETE FROM devices WHERE device_id IN ('probe-dev-001','probe-dev-002'); \
+             DELETE FROM users  WHERE user_id   IN ('attacker-probe-001','attacker-probe-002');"
+
+# then confirm they are gone:
+wrangler d1 execute seele-memory-db --remote \
+  --command "SELECT (SELECT COUNT(*) FROM devices WHERE device_id IN ('probe-dev-001','probe-dev-002')) AS devices_left, \
+                    (SELECT COUNT(*) FROM users   WHERE user_id   IN ('attacker-probe-001','attacker-probe-002')) AS users_left;"
 ```
+
+⚠️ **NOT YET RUN** — blocked on the same missing D1 permission as the deploy (see
+"Not deployed" above). Once `POST /api/keys/revoke` ships, these rows can at least be
+neutralized by revoking the devices instead of deleting them; before that, only the
+direct D1 DELETE works.
+
+Also: after deploying migration 0003, `revoked_at` exists, so revocation works. Before
+that migration the column does not exist and `POST /api/keys/revoke` will 500.
 
 This is the strongest argument for the fix in Finding 1: **tokens are not
 revocable.** Any token ever minted by that endpoint stays valid for a year regardless
@@ -297,6 +310,36 @@ Two things worth knowing if you read the code later:
 
 The Access dashboard change (below) is still required — the code fix assumes Access is
 actually attached to the hostname, and the header is what it trusts.
+
+### ⚠️ NOT DEPLOYED — BLOCKED as of 2026-10-22
+
+The fix above is committed and pushed to `main` (`75fbe14`) but **is not live**.
+The available Cloudflare token lacks the required scopes:
+
+- `wrangler d1 migrations apply seele-memory-db --remote` → `7403`
+- `wrangler d1 execute ... --remote` (even a `SELECT`) → `7403`
+- `wrangler deploy` → `No access to the specified resource` at
+  `workers/scripts/seele-memory/versions`
+
+The token in `~/.cloudflare-credentials` is a `cfut_` user token; the spec expected a
+`cfat_` one. It authenticates and can read Workers metadata, but has neither D1 nor
+Workers-write access.
+
+**Until this is deployed, the live endpoint still mints tokens for any caller-chosen
+`user_id`.** Verified during TASK-101: an anonymous
+`POST /api/keys/register {"user_id":"live-probe-check", ...}` returned 200 with a valid
+365-day token.
+
+To finish, with a token that has D1 edit + Workers Scripts edit:
+
+```bash
+export CLOUDFLARE_API_TOKEN=<cfat_ token>
+export CLOUDFLARE_ACCOUNT_ID=4240b199ca30d185e7954e6166582e7c
+cd worker
+npx wrangler d1 migrations apply seele-memory-db --remote   # adds devices.revoked_at
+npx wrangler deploy
+# then: anonymous register must be 401, and delete the probe rows below
+```
 
 ---
 
