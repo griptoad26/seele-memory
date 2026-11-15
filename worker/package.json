@@ -8,6 +8,7 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "node test/e2e_multidevice_sync.mjs",
     "deploy": "wrangler deploy",
     "deploy:secret": "wrangler secret put GRANT_JWT",
     "tail": "wrangler tail"

@@ -343,6 +343,113 @@ npx wrangler deploy
 
 ---
 
+## 🔴 The sync write path is BROKEN in production (TASK-seele-cloud-20261114-104)
+
+**Every conversation upload fails with HTTP 500:**
+
+```
+D1_ERROR: foreign key mismatch - "conversations" referencing "devices": SQLITE_ERROR
+```
+
+This is not a configuration issue and not intermittent — it is 100% of uploads, so
+seele-cloud has never actually persisted a conversation in production.
+
+### Root cause
+
+`migrations/0001_initial.sql` declares a composite foreign key
+
+```sql
+FOREIGN KEY (user_id, device_id) REFERENCES devices(user_id, device_id)
+```
+
+and creates
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_devices_user_device
+  ON devices (user_id, device_id);
+```
+
+That index is **not UNIQUE**, and `devices` has only a single-column PRIMARY KEY
+(`device_id`) — so nothing provides a UNIQUE index over `(user_id, device_id)` to act
+as the FK's parent key. SQLite parses the FK as malformed and refuses **any** insert
+into `conversations`.
+
+The existing runtime repair in `src/db.js` (`ensureSchema()`) could not fix it:
+
+```sql
+CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_user_device ON devices(user_id, device_id)
+```
+
+`IF NOT EXISTS` matches on the index **name**, and a non-unique index of that name
+already exists — so the statement is skipped and the index stays non-unique. Verified:
+
+```
+before: index is UNIQUE? (0,)
+after runtime fix, index is UNIQUE? (0,)
+```
+
+The index has to be **dropped** before it can be recreated as UNIQUE.
+
+### The fix (committed on `task/104-e2e-multidevice-sync`)
+
+* `migrations/0004_fix_devices_unique_index.sql` — `DROP INDEX IF EXISTS` then
+  `CREATE UNIQUE INDEX`. Re-appliable.
+* `src/db.js` `ensureSchema()` — now checks `pragma_index_list` for the index's
+  uniqueness and drops + recreates it when it is missing or non-unique.
+
+**Deploying the Worker is sufficient; the migration is optional.** The live Worker
+already calls `ensureSchema()` on every upload (`src/sync.js`), and the repaired
+`ensureSchema()` self-heals the schema on the first upload attempt. The migration is
+still recommended so the schema is correct even before the first write.
+
+Verified against a local `wrangler dev` server with the real migrations applied:
+
+| Worker | Schema | E2E result |
+|---|---|---|
+| pre-fix | defective (0001–0003) | **19 passed, 16 failed** (exact production error) |
+| post-fix | defective (0001–0003) | **36 passed, 0 failed** (self-healed) |
+| post-fix | migrated (0001–0004) | **36 passed, 0 failed** |
+
+### How to deploy
+
+The blocker is the same token-scope problem described above — `wrangler deploy` still
+returns "No access to the specified resource" with the current `cfut_` token, and
+`wrangler d1 ... --remote` still returns `7403`. With a token that has Workers Scripts
+edit + D1 edit:
+
+```bash
+export CLOUDFLARE_API_TOKEN=<cfat_ token>
+export CLOUDFLARE_ACCOUNT_ID=4240b199ca30d185e7954e6166582e7c
+cd worker
+npx wrangler deploy            # enough — ensureSchema() self-heals on first upload
+npx wrangler d1 migrations apply seele-memory-db --remote   # optional, recommended
+```
+
+Then verify:
+
+```bash
+node test/e2e_multidevice_sync.mjs \
+  --base https://seele-memory.griptoad.workers.dev --devices 3
+# expect: 36 passed, 0 failed
+```
+
+### The regression test
+
+`test/devices-unique-index.test.js` runs on **real SQLite** (`node:sqlite` with
+`foreign_keys=ON`), because the `FakeD1` harness documents "Foreign keys — never
+enforced" and therefore cannot reproduce this defect at all — a FakeD1 test would pass
+both before and after the fix and prove nothing. The suite asserts the exact
+production error is reproduced, that the repair resolves it, and that the migration
+SQL alone is sufficient.
+
+`test/e2e_multidevice_sync.mjs` is the HTTP end-to-end harness: 3 independent device
+registrations, one shared tenant, each device uploading its own conversations, every
+device downloading every other device's conversations, payload byte round-trip,
+per-device provenance, state + device registry, and negative controls (unauthenticated
+download, bogus-token upload).
+
+---
+
 ## Also worth correcting
 
 The co-resident `seele-fresh` proxy answers with `x-seele-fresh` /
