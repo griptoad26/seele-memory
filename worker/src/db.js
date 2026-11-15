@@ -519,15 +519,51 @@ export async function queryVectors(v, { values, topK }) {
  */
 let schemaEnsured = false;
 
+/**
+ * True iff `idx_devices_user_device` exists and is UNIQUE.
+ *
+ * The FK in `conversations` needs a UNIQUE index on
+ * devices(user_id, device_id); 0001_initial.sql created a NON-unique one,
+ * so every conversation insert failed with
+ *   D1_ERROR: foreign key mismatch - "conversations" referencing "devices"
+ */
+async function devicesIndexIsUnique(db) {
+  try {
+    const row = await db
+      .prepare(
+        `SELECT "unique" AS u FROM pragma_index_list('devices')
+         WHERE name = 'idx_devices_user_device'`
+      )
+      .first();
+    return !!(row && row.u);
+  } catch (_) {
+    // pragma_index_list is unavailable on very old SQLite builds; fall
+    // back to "assume it needs recreating", which is the safe direction.
+    return false;
+  }
+}
+
 export async function ensureSchema(db) {
   if (schemaEnsured) return;
   try {
-    await db
-      .prepare(
-        `CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_user_device
-         ON devices(user_id, device_id)`
-      )
-      .run();
+    // Repair the devices index if it is missing or non-unique.
+    //
+    // `CREATE UNIQUE INDEX IF NOT EXISTS` is NOT enough on its own: when
+    // a NON-unique index with the same name already exists, IF NOT EXISTS
+    // skips the statement and the index stays non-unique — the FK remains
+    // malformed and inserts keep failing. The index therefore has to be
+    // dropped first. See migrations/0004_fix_devices_unique_index.sql for
+    // the full write-up.
+    if (!(await devicesIndexIsUnique(db))) {
+      await db.prepare(`DROP INDEX IF EXISTS idx_devices_user_device`).run();
+      await db
+        .prepare(
+          `CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_user_device
+           ON devices(user_id, device_id)`
+        )
+        .run();
+    }
+
     await db
       .prepare(
         `CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_dedupe
