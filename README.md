@@ -44,6 +44,7 @@ seele-memory/
 │       └── README.md
 ├── examples/                        Claude / Vercel AI SDK / LangChain
 ├── docs/                            architecture, embedding, self-host, security model
+│                                    + API stability contract (API-STABILITY.md)
 ├── deployments/                     wrangler deploy + env.example
 ├── README.md
 └── LICENSE                          MIT
@@ -61,6 +62,8 @@ npm install @seele/memory-client
 Documentation:
 - SDK reference: [`sdk/typescript/README.md`](./sdk/typescript/README.md)
 - Architecture: [`docs/architecture.md`](./docs/architecture.md)
+- **API stability contract & deprecation policy:**
+  [`docs/API-STABILITY.md`](./docs/API-STABILITY.md)
 - Embedding integration (replace the default stub with a real model):
   [`docs/embedding.md`](./docs/embedding.md)
 - Self-hosting the Worker: [`docs/self-host.md`](./docs/self-host.md)
