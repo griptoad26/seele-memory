@@ -449,15 +449,17 @@ verify_live() {
   health_body="$(printf '%s' "$health_body" | sed '$d')"
 
   if [[ "$health_code" == "000" || -z "$health_body" ]]; then
-    die "health endpoint unreachable at $BASE_URL/api/mem/health"
+    fail "health endpoint unreachable at $BASE_URL/api/mem/health"
+    return 1
   fi
   if [[ "$health_code" != "200" ]]; then
     # 429 is Cloudflare rate limiting this host, 1027 is a Worker error
     # code, 5xx is the Worker itself failing. None of these mean the
     # release is healthy, and silently continuing would make this check
     # worthless.
-    die "health endpoint returned HTTP $health_code, not 200.
+    fail "health endpoint returned HTTP $health_code, not 200.
   body: $(printf '%s' "$health_body" | head -c 200)"
+    return 1
   fi
   info "health: $health_body"
 
@@ -465,11 +467,13 @@ verify_live() {
   live_version="$(printf '%s' "$health_body" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).version||"")}catch(e){console.log("")}})' || true)"
 
   if [[ -z "$live_version" ]]; then
-    die "health endpoint did not report a version (body: $(printf '%s' "$health_body" | head -c 200))"
+    fail "health endpoint did not report a version (body: $(printf '%s' "$health_body" | head -c 200))"
+    return 1
   fi
   if [[ -n "$VERSION" && "$live_version" != "$VERSION" ]]; then
-    die "Live Worker reports version '$live_version', expected '$VERSION'.
+    fail "Live Worker reports version '$live_version', expected '$VERSION'.
   The deploy did not take effect (or the custom domain is shadowed — see CHANGELOG §Known limitations)."
+    return 1
   fi
   ok "live Worker reports version $live_version"
 
@@ -483,15 +487,18 @@ verify_live() {
     -H 'Authorization: Bearer release-probe-not-a-real-token' \
     -d '{}' 2>/dev/null || echo 000)"
   if [[ "$probe" == "000" ]]; then
-    die "sync endpoint unreachable"
+    fail "sync endpoint unreachable"
+    return 1
   fi
   # An invalid token must be rejected with 401. A 500 here would mean the
   # database schema is still broken.
   if [[ "$probe" == "500" ]]; then
-    die "sync upload returned 500 — the D1 schema is still broken.
+    fail "sync upload returned 500 — the D1 schema is still broken.
   Apply the migrations: ./scripts/release.sh --version $VERSION --skip-deploy --skip-tag"
+    return 1
   fi
   ok "sync write path returns $probe (not 500 — schema is healthy)"
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -547,7 +554,9 @@ main() {
   load_credentials
 
   if [[ "$VERIFY_LIVE_ONLY" -eq 1 ]]; then
-    verify_live
+    if ! verify_live; then
+      die "live verification failed"
+    fi
     echo
     ok "live verification complete"
     return 0
@@ -556,8 +565,12 @@ main() {
   check_credentials
 
   if [[ "$REINDEX_ONLY" -eq 1 ]]; then
-    reindex_vectorize
-    verify_live
+    if ! reindex_vectorize; then
+      die "reindex failed"
+    fi
+    if ! verify_live; then
+      die "live verification failed"
+    fi
     echo
     ok "reindex complete"
     return 0
@@ -581,7 +594,12 @@ main() {
     warn "reindex failed; continuing because the deploy was skipped"
   fi
 
-  verify_live
+  if ! verify_live; then
+    if [[ "$DO_DEPLOY" -eq 1 ]]; then
+      die "Live verification failed during a full release — refusing to tag."
+    fi
+    warn "live verification failed; continuing because the deploy was skipped"
+  fi
   tag_release
 
   echo
