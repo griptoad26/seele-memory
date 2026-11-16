@@ -50,3 +50,14 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: E2E multi-device sync (local D1)
+        # Runs the REAL Worker against a REAL local D1 (miniflare/workerd
+        # SQLite, foreign keys enforced) with a local Vectorize. It never
+        # contacts production — test/local-worker.js refuses any non-loopback
+        # host and reads no Cloudflare credentials.
+        #
+        # This is the suite from TASK-seele-cloud-20261116-110. It proves
+        # sync convergence across 3 devices, that the embedding round-trips
+        # as a real vector, and that a revoked device token stops working.
+        run: npm run test:e2e

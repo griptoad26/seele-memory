@@ -27,6 +27,32 @@ const N_DEVICES = Number(args.devices || 3);
 const RUN_ID = `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const USER_ID = args.user_id || `e2e-multidevice-${RUN_ID}`;
 
+// ── SAFETY: this script talks to a REAL (production) Worker ────────────────
+//
+// This is the ORIGINAL one-shot manual test from TASK-seele-cloud-20261114-104.
+// It writes real rows to whatever --base points at, and its default is the
+// production endpoint.
+//
+// The committed, repeatable suite is `npm run test:e2e`
+// (test/e2e_sync_local.mjs) — it runs against a LOCAL D1 and can never
+// touch production. This script remains only for deliberately testing a
+// deployed endpoint.
+//
+// To remove the footgun we require an explicit opt-in flag.
+if (!args['i-understand-this-writes-to-production']) {
+  console.error(
+    'REFUSING TO RUN.\n\n' +
+    'This script writes REAL data to the endpoint given by --base\n' +
+    `(currently: ${BASE}).\n\n` +
+    'For the repeatable local suite (no production contact) run:\n' +
+    '    npm run test:e2e\n\n' +
+    'To deliberately test a deployed endpoint, re-run with:\n' +
+    '    --i-understand-this-writes-to-production\n'
+  );
+  process.exit(2);
+}
+console.warn(`\n!! WRITING REAL DATA TO ${BASE} !!\n`);
+
 let passed = 0, failed = 0;
 const ok = (label, cond, extra = '') => {
   if (cond) { passed++; console.log(`  [PASS] ${label}`); }
