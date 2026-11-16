@@ -13,6 +13,8 @@ on:
     branches:
       - main
       - master
+      - 'task/**'
+      - 'feature/**'
     paths:
       - 'worker/**'
       - '.github/workflows/worker-tests.yml'
