@@ -118,6 +118,11 @@ info()  { printf "    %s\n" "$*"; }
 ok()    { printf "    %s✓ %s%s\n" "$GREEN" "$*" "$RESET"; }
 warn()  { printf "    %s! %s%s\n" "$YELLOW" "$*" "$RESET"; }
 die()   { printf "\n%s✗ %s%s\n" "$RED" "$*" "$RESET" >&2; exit 1; }
+# fail() reports an error and returns non-zero WITHOUT exiting, so the
+# caller can decide whether the failure is fatal. Used by the reindex
+# step, which is fatal in a full release but not when the deploy was
+# explicitly skipped.
+fail()  { printf "\n%s✗ %s%s\n" "$RED" "$*" "$RESET" >&2; return 1; }
 dry()   { printf "    %s[dry-run] %s%s\n" "$DIM" "$*" "$RESET"; }
 
 run() {
@@ -348,9 +353,10 @@ reindex_vectorize() {
   # problem reports the actual cause instead of "Please provide valid
   # vector identifiers for deletion".
   if ! npx --no-install wrangler vectorize list-vectors "$VEC_INDEX" --count 1 --json >/dev/null 2>&1; then
-    die "Cannot read the Vectorize index '$VEC_INDEX'.
+    fail "Cannot read the Vectorize index '$VEC_INDEX'.
   The token needs Vectorize scope, and the index must exist
   (wrangler vectorize create $VEC_INDEX --dimensions=384 --metric=cosine)."
+    return 1
   fi
 
   info "vectors currently in the index: $count"
@@ -385,7 +391,7 @@ reindex_vectorize() {
   if [[ "$DESTRUCTIVE_REINDEX" -eq 1 ]]; then
     info "deleting the $count stub vectors from the index"
     npx --no-install wrangler vectorize delete-vectors "$VEC_INDEX" --ids $ids \
-      || die "could not delete the stub vectors."
+      || { fail "could not delete the stub vectors."; return 1; }
     ok "index cleared of stub embeddings"
     info "re-uploading the existing vectors (same ids, same values)"
     if [[ -s "$dump" ]]; then
@@ -561,7 +567,20 @@ main() {
   run_tests
   apply_migrations
   deploy_worker
-  reindex_vectorize
+
+  # The reindex needs the Vectorize scope. If the deploy was explicitly
+  # skipped (a partial release: migrate/deploy/tag without touching the
+  # index), a Vectorize failure is reported but does not abort the rest of
+  # the release. In a FULL release it stays fatal, because shipping a
+  # release with a stale index is exactly what this task exists to
+  # prevent.
+  if ! reindex_vectorize; then
+    if [[ "$DO_DEPLOY" -eq 1 ]]; then
+      die "Reindex failed during a full release — refusing to tag."
+    fi
+    warn "reindex failed; continuing because the deploy was skipped"
+  fi
+
   verify_live
   tag_release
 
