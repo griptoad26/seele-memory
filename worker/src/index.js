@@ -200,6 +200,56 @@ function freshnessHeaders(target) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Proxy credential scrubbing.
+//
+// SECURITY (TASK-seele-cloud-20261116-119): the proxy is a *public* reverse
+// proxy to a third-party origin (ORIGIN_URL, in production
+// https://griptoad26.github.io). It used to copy the inbound request
+// headers verbatim, which meant any credential the caller attached was
+// handed to that third party.
+//
+// The reachable attack path: the router matches API routes with exact
+// string equality, so a near-miss spelling falls through to the proxy.
+// A GET to `/api/sync/state/extra`, `/API/SYNC/STATE`, `/api//sync/state`,
+// or any unmatched path carrying an `Authorization: Bearer <device_token>`
+// header was forwarded — token and all — to the upstream origin.
+//
+// Fix: the proxy is a *content* proxy, not a credential proxy. Strip every
+// credential-bearing header before forwarding. The upstream serves public
+// marketing content; it has no business seeing a device token, an Access
+// session, or any Authorization material.
+// ---------------------------------------------------------------------------
+
+const PROXY_STRIPPED_HEADERS = [
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'set-cookie',
+  'cf-access-authenticated-user-email',
+  'cf-access-authenticated-user-id',
+  'cf-access-jwt-assertion',
+  'cf-access-client-id',
+  'cf-access-client-secret',
+  'x-seele-key',
+  'x-api-key',
+  'x-auth-token',
+];
+
+function scrubProxyHeaders(inbound) {
+  const headers = new Headers(inbound);
+  for (const name of PROXY_STRIPPED_HEADERS) headers.delete(name);
+  // Belt and braces: strip any remaining `cf-access-*` / `authorization-*`
+  // variant that isn't enumerated above.
+  for (const name of Array.from(headers.keys())) {
+    const lower = name.toLowerCase();
+    if (lower.startsWith('cf-access-') || lower.startsWith('authorization-')) {
+      headers.delete(name);
+    }
+  }
+  return headers;
+}
+
 async function handleFreshProxy(request, env, url) {
   const origin = env.ORIGIN_URL || 'https://griptoad26.github.io';
   // Strip the /fresh mount prefix before forwarding, so the origin sees
@@ -210,7 +260,7 @@ async function handleFreshProxy(request, env, url) {
       : url.pathname.replace(/^\/fresh/, '') || '/';
   const target = origin + forwardPath + url.search;
 
-  const headers = new Headers(request.headers);
+  const headers = scrubProxyHeaders(request.headers);
   headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
   headers.set('Pragma', 'no-cache');
 
@@ -243,7 +293,36 @@ async function handleFreshProxy(request, env, url) {
   for (const [k, v] of Object.entries(fresh)) out.headers.set(k, v);
   out.headers.delete('CF-Cache-Status');
   out.headers.delete('Age');
+  // Do not reflect upstream cookies into the API origin's response space.
+  out.headers.delete('Set-Cookie');
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// API namespace guard.
+//
+// The router matches API routes by exact string equality. Any path under
+// the API namespaces that does not match exactly falls through to the
+// proxy, which turns a typo'd or malformed API call into a request to a
+// third-party origin. The API surface has no business being proxied at
+// all — an unmatched path under /api/* or /mem/* is a client error.
+//
+// This closes the near-miss routing bypass (see PROBE 11): `/api/sync/
+// state/extra`, `/API/SYNC/STATE`, `/api//sync/state`, etc. now get a
+// clean 404 from the Worker instead of being proxied upstream.
+// ---------------------------------------------------------------------------
+
+function isApiNamespace(path) {
+  const lower = path.toLowerCase();
+  // Normalize duplicate slashes so `/api//sync` is classified the same as
+  // `/api/sync`.
+  const normalized = lower.replace(/\/{2,}/g, '/');
+  return (
+    normalized === '/api' ||
+    normalized.startsWith('/api/') ||
+    normalized === '/mem' ||
+    normalized.startsWith('/mem/')
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +419,20 @@ export default {
       // Matches seele.agency's pre-existing behavior. Requests to the
       // root and unknown paths are served by the origin with cache-
       // busting headers so first-time visitors still get fresh content.
+      //
+      // EXCEPT under /api/* and /mem/*: the proxy is for public content,
+      // and the API namespaces must never be proxied to a third-party
+      // origin. An unmatched API path is a client error, not a page
+      // fetch. (SECURITY: TASK-seele-cloud-20261116-119.)
+      if (isApiNamespace(path)) {
+        return json(request, env, {
+          ok: false,
+          service: SERVICE,
+          version: VERSION,
+          error: 'not_found',
+          message: `No such route: ${request.method} ${url.pathname}`,
+        }, 404);
+      }
       return await handleFreshProxy(request, env, url);
     } catch (err) {
       return json(request, env, {

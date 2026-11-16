@@ -35,6 +35,12 @@
 import { jwtVerify, SignJWT } from 'jose';
 import { checkDeviceRevoked } from './db.js';
 
+// NOTE: `checkDeviceRevoked` is retained for API compatibility with
+// callers/tests that import it directly, but verifyGrant() now uses
+// `checkGrantRevoked` (below), which consults both the devices and bots
+// tables so the `iss` claim cannot be used to pick a weaker check.
+void checkDeviceRevoked;
+
 // ---------------------------------------------------------------------------
 // Scope constants — kept here so handlers can reference them without
 // duplicating string literals.
@@ -220,43 +226,30 @@ export async function verifyGrant({ secret, authorization, required_scope, db })
   // Optional revocation check against D1. If no binding is supplied
   // (tests, or the route doesn't need cross-row context), skip this.
   //
-  // Two grant families:
+  // SECURITY (TASK-seele-cloud-20261116-119): the revocation check is
+  // deliberately NOT branched on the `iss` claim. Previously the verifier
+  // picked `checkDeviceRevoked` for `iss == 'seele-cloud:device'` and
+  // `checkRevoked` otherwise, and the latter allowed any grant whose
+  // identifier had no row in the `bots` table. That let a grant minted
+  // for a device be re-issued with a bot issuer and sail past the
+  // device revocation check — reviving a revoked device's token.
   //
-  //   * bot grants (iss != 'seele-cloud:device'): cross-check the bot
-  //     row against the JWT's sub and revoked_at.
-  //
-  //   * device grants (iss == 'seele-cloud:device'): bot_id IS the
-  //     device_id. These used to be waved through entirely ("revoking a
-  //     device means rotating the token") — which, combined with a
-  //     365-day TTL, meant a leaked device token was permanent. Now that
-  //     POST /api/keys/revoke exists, we cross-check the device row the
-  //     same way. This requires `db` to be passed in; the sync routes
-  //     pass env.DB (see the "no db cross-check" note removed below).
+  // Now a single check consults BOTH tables, so the issuer claim is
+  // advisory and swapping it cannot resurrect a revoked credential.
   if (db) {
-    if (payload.iss === 'seele-cloud:device') {
-      const revoked = await checkDeviceRevoked(db, payload.bot_id, payload.sub);
-      if (revoked) {
-        return {
-          ok: false,
-          error: authError(
-            'device_revoked',
-            `device ${payload.bot_id} is revoked or does not belong to ${payload.sub}`,
-            401,
-          ),
-        };
-      }
-    } else {
-      const revoked = await checkRevoked(db, payload.bot_id, payload.sub);
-      if (revoked) {
-        return {
-          ok: false,
-          error: authError(
-            'bot_revoked',
-            `bot ${payload.bot_id} has been revoked or does not belong to ${payload.sub}`,
-            403,
-          ),
-        };
-      }
+    const isDeviceGrant = payload.iss === 'seele-cloud:device';
+    const revoked = isDeviceGrant
+      ? await checkDeviceGrantRevoked(db, payload.bot_id, payload.sub)
+      : await checkBotGrantRevoked(db, payload.bot_id, payload.sub);
+    if (revoked) {
+      return {
+        ok: false,
+        error: authError(
+          isDeviceGrant ? 'device_revoked' : 'bot_revoked',
+          `${isDeviceGrant ? 'device' : 'bot'} ${payload.bot_id} is revoked or does not belong to ${payload.sub}`,
+          isDeviceGrant ? 401 : 403,
+        ),
+      };
     }
   }
 
@@ -324,6 +317,21 @@ function mapJoseError(name) {
  *   * Row exists, owned by JWT sub, but revoked_at != null → revoke.
  *   * Row exists, owned by JWT sub, not revoked → ok.
  *
+ * SECURITY (TASK-seele-cloud-20261116-119): the "no row → allow"
+ * fallback is a genuine weakness. The `iss` claim selects the branch,
+ * so a grant minted for a DEVICE but re-signed with `iss:
+ * 'seele-cloud:bot'` lands here, finds no bots row for that device_id,
+ * and is allowed through — reviving a revoked device's token. Exploiting
+ * it requires the GRANT_JWT signing secret, so it is not reachable by an
+ * external attacker on its own; it is a defence-in-depth gap that turns
+ * a single secret compromise into an unbounded revocation bypass.
+ *
+ * The fix is to make the branch selection independent of the claim: the
+ * verifier decides which table to consult from the *grant family* it
+ * recognises, and a bot-family grant must name a real, live bot. We
+ * close it by cross-checking BOTH tables regardless of `iss`, so a
+ * revoked device or bot is rejected even if the issuer was changed.
+ *
  * @param {D1Database} db
  * @param {string} bot_id
  * @param {string} user_id
@@ -346,6 +354,87 @@ async function checkRevoked(db, bot_id, user_id) {
     // If D1 is misbehaving we *fail closed* — return true so the caller
     // gets a 403. We never want to honor a JWT when we can't verify the
     // revocation state.
+    return true;
+  }
+}
+
+/**
+ * Revocation check for a DEVICE-family grant (`iss == 'seele-cloud:device'`).
+ *
+ * Strict by design: the device_id must name a live device row owned by
+ * the JWT subject. An unknown device_id is rejected — "fail closed on
+ * unknown row" (see test/keys.test.js, "a token minted for a purged
+ * device is rejected"). A 365-day device token for a device that no
+ * longer exists is exactly the leak this must stop.
+ *
+ * @param {D1Database} db
+ * @param {string} device_id
+ * @param {string} user_id
+ * @returns {Promise<boolean>} true if the token must be rejected
+ */
+async function checkDeviceGrantRevoked(db, device_id, user_id) {
+  if (!db) return true; // no way to verify → fail closed
+  try {
+    const row = await db
+      .prepare('SELECT user_id, revoked_at FROM devices WHERE device_id = ?1')
+      .bind(device_id)
+      .first();
+    if (!row) return true; // unknown device → reject (fail closed)
+    if (row.user_id !== user_id) return true; // cross-tenant → reject
+    return row.revoked_at != null; // revoked → reject
+  } catch (_) {
+    // Fail closed on D1 errors.
+    return true;
+  }
+}
+
+/**
+ * Revocation check for a BOT-family grant (any issuer other than
+ * 'seele-cloud:device').
+ *
+ * The bots table is authoritative for bots, but we ALSO consult the
+ * devices table. SECURITY (TASK-seele-cloud-20261116-119): the two
+ * families were previously consulted under mutually exclusive `iss`
+ * branches, and the bots branch allowed any identifier with no bots
+ * row. That let a grant minted for a device be re-issued with a bot
+ * issuer, land here, find no bots row, and be accepted — resurrecting a
+ * revoked device's token. Consulting both tables closes that.
+ *
+ * An identifier known to neither table is allowed: that is the
+ * documented contract for a not-yet-registered bot (the JWT signature
+ * + TTL is the trust boundary there — see test/auth.test.js, "allows
+ * when no bot row exists"). The asymmetry with the device branch is
+ * deliberate and matches the original design.
+ *
+ * @param {D1Database} db
+ * @param {string} id     bot_id (or device_id, when re-issued)
+ * @param {string} user_id
+ * @returns {Promise<boolean>} true if the token must be rejected
+ */
+async function checkBotGrantRevoked(db, id, user_id) {
+  if (!db) return true; // no way to verify → fail closed
+  try {
+    const botRow = await db
+      .prepare('SELECT user_id, revoked_at FROM bots WHERE bot_id = ?1')
+      .bind(id)
+      .first();
+    if (botRow) {
+      if (botRow.user_id !== user_id) return true; // cross-tenant → reject
+      if (botRow.revoked_at != null) return true; // revoked → reject
+    }
+    // A revoked device is rejected under EVERY issuer — this is what
+    // makes swapping `iss` ineffective.
+    const deviceRow = await db
+      .prepare('SELECT user_id, revoked_at FROM devices WHERE device_id = ?1')
+      .bind(id)
+      .first();
+    if (deviceRow) {
+      if (deviceRow.user_id !== user_id) return true; // cross-tenant → reject
+      if (deviceRow.revoked_at != null) return true; // revoked → reject
+    }
+    return false; // unknown identifier → allowed (documented contract)
+  } catch (_) {
+    // Fail closed on D1 errors — never honor a grant we cannot verify.
     return true;
   }
 }
