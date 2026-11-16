@@ -163,7 +163,7 @@ export async function handleRecall(request, env) {
         score: r.score,
         conversation_id: row.conversation_id,
         created_at: row.created_at,
-        ciphertext: toBase64(row.body_encrypted),
+        body_encrypted: toBase64(row.body_encrypted),
       };
     });
 
