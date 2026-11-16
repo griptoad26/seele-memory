@@ -78,10 +78,21 @@ Creates `seele-memory-db` (D1) and `seele-memory-embeddings` (Vectorize,
 
 ## Deploy
 
+For a **release** (migrations + deploy + Vectorize reindex + version check +
+tag), use the release script from the repo root:
+
+```bash
+../scripts/release.sh --version 1.0.0
+```
+
+See [`../docs/release.md`](../docs/release.md) for the full procedure.
+
+For an ad-hoc deploy of the Worker alone:
+
 ```bash
 ./scripts/deploy.sh
 # or step-by-step:
-wrangler d1 execute seele-memory-db --remote --file=migrations/0001_initial.sql
+wrangler d1 migrations apply seele-memory-db --remote
 wrangler secret put GRANT_JWT      # paste the secret value at the prompt
 wrangler deploy
 ```
@@ -103,6 +114,26 @@ domains shadow Worker routes on the same hostname). The canonical base
 URL is `https://seele-memory.griptoad.workers.dev`. See
 `./ROUTING.md` for the long-form hostname situation and exit options.
 
+### 🔴 Sync writes are broken in production (until the fix is deployed)
+
+Every `POST /api/sync/upload` currently returns HTTP 500 with
+
+```
+D1_ERROR: foreign key mismatch - "conversations" referencing "devices": SQLITE_ERROR
+```
+
+`0001_initial.sql` creates `idx_devices_user_device` as a **non-unique** index next
+to a composite FK that requires it to be unique, so SQLite rejects every insert into
+`conversations`. The runtime repair in `src/db.js` was a no-op (`IF NOT EXISTS`
+matches the index *name*, so it never upgrades the index to UNIQUE).
+
+The fix is on branch `task/104-e2e-multidevice-sync` (commit `b97f9f2`):
+`migrations/0004_fix_devices_unique_index.sql` plus a corrected `ensureSchema()`.
+**Deploying the Worker is sufficient** — the repaired `ensureSchema()` self-heals
+the schema on the first upload. See `./ACCESS.md` §"The sync write path is BROKEN
+in production" for the full write-up, the verification table, and the deploy
+commands.
+
 ## Tests
 
 ```bash
@@ -118,10 +149,30 @@ Vitest covers:
 * Recall — happy-path / top_k clamping / cross-user isolation (critical) /
   Vectorize-with-phantom-id safety
 * full-recall — keyword scan
+* devices unique-index repair — on **real SQLite** (`node:sqlite`, FKs enforced),
+  because `FakeD1` never enforces foreign keys and so cannot reproduce the defect
 
 Tests run against an in-memory fake D1 (`test/fake-d1.js`) and a
 fake Vectorize (`test/fake-vectorize.js`); no live Cloudflare access
 required for the unit suite.
+
+### End-to-end multi-device sync
+
+```bash
+# against a local worker
+npx wrangler dev --local --port 8787
+node test/e2e_multidevice_sync.mjs --base http://127.0.0.1:8787 --devices 3
+
+# against production
+node test/e2e_multidevice_sync.mjs \
+  --base https://seele-memory.griptoad.workers.dev --devices 3
+```
+
+Registers 3 independent devices under one tenant, has each upload its own
+conversation, then checks that every device can download every other device's
+conversation with the payload bytes intact, plus per-device provenance, the state +
+device registry endpoints, and negative controls (unauthenticated download, bogus-token
+upload). Expect **36 passed, 0 failed**.
 
 ## CF Access policies (manual dashboard step)
 

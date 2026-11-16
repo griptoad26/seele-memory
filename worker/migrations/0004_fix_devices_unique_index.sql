@@ -1,0 +1,63 @@
+-- 0004_fix_devices_unique_index.sql
+--
+-- FIXES A HARD BLOCKER: every conversation sync insert failed with
+--   D1_ERROR: foreign key mismatch - "conversations" referencing "devices"
+--
+-- Root cause
+-- ----------
+-- 0001_initial.sql creates the composite foreign key
+--   FOREIGN KEY (user_id, device_id) REFERENCES devices(user_id, device_id)
+-- and ALSO creates
+--   CREATE INDEX IF NOT EXISTS idx_devices_user_device
+--     ON devices (user_id, device_id);
+--
+-- That index is NOT UNIQUE. SQLite requires the parent key of a composite
+-- foreign key to be covered by a UNIQUE index (or be the table's PRIMARY
+-- KEY). A plain index does not satisfy that, so SQLite parses the FK as
+-- malformed and refuses ANY insert into `conversations`:
+--
+--   D1_ERROR: foreign key mismatch - "conversations" referencing "devices"
+--
+-- This is why POST /api/sync/upload returned HTTP 500 for every device:
+-- the sync path was 100% broken end to end, not intermittently.
+--
+-- Why the existing runtime "fix" did not help
+-- -------------------------------------------
+-- src/db.js `ensureSchema()` runs
+--   CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_user_device
+--     ON devices(user_id, device_id)
+-- at the start of every upload. On an already-migrated database this is a
+-- NO-OP: the index NAME already exists, so `IF NOT EXISTS` skips the
+-- statement and the index stays non-unique. Verified locally:
+--
+--   before: index is UNIQUE? (0,)
+--   after runtime fix, index is UNIQUE? (0,)
+--
+-- The index has to be DROPPED before it can be recreated as UNIQUE.
+--
+-- The fix
+-- --------
+-- Drop the non-unique index and recreate it as UNIQUE. The uniqueness
+-- constraint is correct for the domain anyway: (user_id, device_id) IS the
+-- identity of a device, and `devices` already has a PRIMARY KEY over it:
+--
+--   CREATE TABLE devices (
+--     user_id TEXT NOT NULL,
+--     device_id TEXT NOT NULL,
+--     ...
+--     PRIMARY KEY (user_id, device_id)
+--   );
+--
+-- D1 note: a UNIQUE index over the same columns as an existing PRIMARY KEY
+-- is allowed (SQLite keeps both; the PRIMARY KEY may be a rowid alias or
+-- an auto-index depending on the table's WITHOUT ROWID-ness). The important
+-- part is that the FK now has a UNIQUE index to point at.
+--
+-- Re-applying this migration is safe: DROP INDEX IF EXISTS tolerates an
+-- already-migrated database, and CREATE UNIQUE INDEX IF NOT EXISTS
+-- tolerates a partially applied one.
+
+DROP INDEX IF EXISTS idx_devices_user_device;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_user_device
+  ON devices (user_id, device_id);

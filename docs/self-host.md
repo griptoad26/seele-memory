@@ -1,56 +1,143 @@
-# Self-host the Worker — `docs/self-host.md`
+# Self-host seele-cloud
 
-This page walks through deploying the seele-memory Worker against
-your own Cloudflare account + a custom domain.
+This page takes a **fresh machine from zero to a running seele-cloud
+Worker** (D1 + Vectorize + a live API), without asking anyone a
+question.
 
-If you just want to consume the public deployment (no infra to
-manage), skip this page and use the SDK defaults.
+If you just want to *consume* the public deployment, skip this page and
+use the SDK defaults — see [Using the SDK](#using-the-sdk) at the
+bottom.
+
+> **Status:** validated against worker `v0.2.0-phase2`. The commands
+> below were run against this repo's own Worker. Steps that require
+> permissions you may not have are marked ⚠️ with the exact scope.
+
+---
 
 ## What you need
 
-1. A Cloudflare account (free tier is enough for development).
-2. A Cloudflare Workers Paid plan ($5/mo for Workers + Pages).
-3. A custom domain you can add to Cloudflare (e.g. `api.yourdomain.com`).
-4. The `wrangler` CLI (`pnpm add -g wrangler`).
+1. **A Cloudflare account.** The free tier is enough for development.
+2. **The Workers Paid plan** ($5/mo) — Workers + Pages are bundled.
+   The free tier does **not** allow Workers deployments.
+3. **A custom domain on Cloudflare** (optional; you can use the
+   auto-generated `workers.dev` hostname instead).
+4. **Node.js 20+** (the Worker uses ESM and `node:test`-style tooling).
+5. **An API token with the exact permissions in the next section.**
+   This is the step that most often blocks people — read it carefully.
 
-## 1. Clone and configure
+---
+
+## ⚠️ The API token — exact permissions required
+
+Everything in this guide runs through the Cloudflare API using
+`CLOUDFLARE_API_TOKEN`. A token missing **either** permission below
+will authenticate fine and then fail with a misleading error.
+
+| Permission | Why it is needed | What happens without it |
+|---|---|---|
+| **Account → Workers Scripts → Edit** | `wrangler deploy` | `No access to the specified resource` at `.../workers/scripts/<name>/versions` |
+| **Account → D1 → Edit** | `wrangler d1 create`, `wrangler d1 migrations apply` | `The given account is not valid or is not authorized to access this service` (**code 7403**) |
+
+Optional, only if you use a custom domain or a zone:
+
+| Permission | Why |
+|---|---|
+| **Zone → Workers Routes → Edit** | `wrangler route add` |
+| **Zone → DNS → Edit** | adding the `api.` subdomain record |
+| **Zone → Zone → Read** | resolving `zone_name` in `wrangler.toml` |
+
+### Creating the token
+
+Dashboard → **My Profile → API Tokens → Create Token** → **Create
+Custom Token**.
+
+- **Permissions:** add *Account → Workers Scripts → Edit* and
+  *Account → D1 → Edit*. Add the zone-level ones only if you need a
+  custom domain.
+- **Account Resources:** *Include → Specific account → your account*.
+- **Zone Resources:** *Include → Specific zone → your zone* (or *All
+  zones* for a first run).
+
+> ### ⚠️ Use an **API Token**, not a User API Key
+>
+> The token must be a `cfat_…` **API Token** with the scopes above.
+>
+> A `cfut_…` **User API Token** (the kind `wrangler login` writes to
+> `~/.cloudflare-credentials`) authenticates and can *read* Workers
+> metadata, but typically carries **neither D1 write nor Workers
+> Scripts write**. It fails at exactly the wrong moment — after you
+> think everything is set up.
+>
+> **How to tell which you have:** the prefix. `cfat_` = API Token with
+> scopes. `cfut_` = User API Token. `wrangler login` writes a `cfut_`.
+>
+> **If you are using a `~/.cloudflare-credentials` file**, it is a
+> **two-line** file:
+>
+> ```
+> cfat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+> 4240b199ca30d185e7954e6166582e7c
+> ```
+>
+> Line 1 is the token, line 2 is the account ID. Export them
+> **separately** — passing the whole file as `CLOUDFLARE_API_TOKEN`
+> yields `Invalid format for Authorization header [code: 6003]`:
+>
+> ```bash
+> export CLOUDFLARE_API_TOKEN="$(sed -n '1p' ~/.cloudflare-credentials | tr -d '\n\r')"
+> export CLOUDFLARE_ACCOUNT_ID="$(sed -n '2p' ~/.cloudflare-credentials | tr -d '\n\r')"
+> ```
+
+**Confirm the token before going further:**
 
 ```bash
-git clone git@github.com:griptoad26/seele-memory.git
+npx wrangler whoami
+```
+
+You should see your account name and ID. `whoami` succeeding does
+**not** prove you have write scopes — it only proves the token is
+valid. The real test is step 3.
+
+---
+
+## 1. Clone
+
+```bash
+git clone https://github.com/griptoad26/seele-memory.git
 cd seele-memory/worker
-cp ../deployments/env.example .dev.vars
 ```
 
-Edit `.dev.vars` and set:
+Use the **HTTPS** URL above. The `git@github.com:` SSH form only works
+if you already have a GitHub SSH key registered; on a fresh machine it
+fails with `Permission denied (publickey)`.
 
-```
-GRANT_JWT=<32-byte random secret, base64-or-hex>
-CF_ACCESS_AUD=<your-access-app-aud>
-```
+The Worker lives in the `worker/` subdirectory. Everything below is run
+from there.
 
-Generate the JWT secret with `openssl rand -base64 32` or
-`node -e 'console.log(require("crypto").randomBytes(32).toString("base64"))'`.
+---
 
-## 2. Create resources
+## 2. Install dependencies
 
 ```bash
-# D1 database for users / devices / bots / conversations / chunks.
-wrangler d1 create seele-memory-db
-# → copy the database_id into wrangler.toml.
-
-# Vectorize index (one global index, 384 dims, cosine distance).
-wrangler vectorize create seele-memory-vec --dimensions=384 --metric=cosine
-# → copy the index_name into wrangler.toml.
+npm install
 ```
 
-Edit `wrangler.toml` so the D1 binding (`DB`), Vectorize binding
-(`VECTORIZE`), and JWT secret (`GRANT_JWT`) all line up:
+This is required — the Worker imports [`jose`](https://www.npmjs.com/package/jose)
+for JWT signing/verification, and `vitest` for the test suite. There is
+no root-level `package.json`; `worker/` is its own npm package.
+
+---
+
+## 3. Create the resources
+
+```bash
+npx wrangler d1 create seele-memory-db
+npx wrangler vectorize create seele-memory-vec --dimensions=384 --metric=cosine
+```
+
+Copy the printed `database_id` and `index_name` into `wrangler.toml`:
 
 ```toml
-name = "seele-memory"
-main = "src/index.js"
-compatibility_date = "2024-09-23"
-
 [[d1_databases]]
 binding = "DB"
 database_name = "seele-memory-db"
@@ -59,45 +146,92 @@ database_id = "<your-database-id>"
 [[vectorize]]
 binding = "VECTORIZE"
 index_name = "seele-memory-vec"
-
-# Secret binding. `wrangler secret put GRANT_JWT` will prompt for the
-# value at deploy time.
 ```
 
-## 3. Run migrations
+> **Vectorize index name ≠ binding.** `index_name` is the Cloudflare
+> resource; `binding` is the variable the Worker reads (`env.VECTORIZE`).
+> Mismatch them and you get `binding not configured` at runtime.
+>
+> The dimension **must** be `384` — that is the embedding width of
+> `bge-small-en-v1.5`, and recall silently returns nothing otherwise.
 
-```bash
-wrangler d1 migrations apply seele-memory-db --remote
+Also set the account ID (used by `wrangler` and by `wrangler route add`):
+
+```toml
+# wrangler.toml
+account_id = "<your-account-id>"
 ```
 
-This applies the SQL in `migrations/*.sql` to your remote D1
-instance. The schema covers Phase 1 (SPEC §"Data model").
+---
 
-## 4. Deploy
+## 4. Set the signing secret
 
 ```bash
-wrangler deploy
+npx wrangler secret put GRANT_JWT
+```
+
+Paste a 32-byte random value:
+
+```bash
+node -e 'console.log(require("crypto").randomBytes(32).toString("base64"))'
+```
+
+`GRANT_JWT` is the **only** secret the Worker reads
+(`env.GRANT_JWT`). It signs both device tokens and bot grants.
+
+> **One secret, two places.** The local `.dev.vars` file and the remote
+> `wrangler secret` are different stores and do not sync. If you use
+> both, set the same value in each.
+
+---
+
+## 5. Run migrations
+
+```bash
+npx wrangler d1 migrations apply seele-memory-db --remote
+```
+
+This applies `worker/migrations/*.sql` in order:
+
+| Migration | Adds |
+|---|---|
+| `0001_initial.sql` | users, devices, bots, conversations, messages, chunks |
+| `0002_alter_encrypted_chunks.sql` | schema gap fix for `encrypted_chunks` |
+| `0003_device_revocation.sql` | `devices.revoked_at` — **required for `POST /api/keys/revoke`** |
+
+> **Migrations are forward-only.** There is no `migrate down`. To roll
+> back, write the reverse SQL by hand and apply it as a new migration.
+>
+> Skipping `0003` means revocation endpoints will 500.
+
+---
+
+## 6. Deploy
+
+```bash
+npx wrangler deploy
 ```
 
 The Worker publishes to its own hostname via `workers_dev = true`:
 
 ```
-https://seele-memory.<your-cloudflare-subdomain>.workers.dev
+https://seele-memory.<your-subdomain>.workers.dev
 ```
 
-This is the **canonical API base URL** until you attach a custom
-domain (see the next section).
+That URL is your **canonical API base URL**.
 
-### Custom domain
+> **The first 60–120s after deploy:** new `workers.dev` hosts need time
+> to issue the edge certificate; early requests fail with
+> `sslv3 alert handshake failure`. That is normal, not your bug.
+
+### Custom domain (optional)
 
 ```bash
-# Add the API subdomain to Cloudflare (the zone must already be on CF).
-wrangler route add "api.yourdomain.com/*" seele-memory
+# The zone must already be on Cloudflare.
+npx wrangler route add "api.yourdomain.com/*" seele-memory
 ```
 
-Set `cf_account_id` in `wrangler.toml` first.
-
-Then register the route in `wrangler.toml`:
+Then declare the routes in `wrangler.toml`:
 
 ```toml
 routes = [
@@ -107,96 +241,189 @@ routes = [
 ```
 
 > **Conflict with Pages.** Cloudflare Pages custom domains take
-> precedence over Worker routes on the same hostname. If you're also
-> running a Pages site on `yourdomain.com`, the Worker routes for
-> `/api/*` and `/mem/*` will not fire because Pages wins the hostname
-> match first. See `deployments/ROUTING.md` (in the repo) for the
-> recommended workarounds.
+> precedence over Worker routes on the same hostname. If a Pages site
+> occupies `yourdomain.com`, the Worker routes for `/api/*` and
+> `/mem/*` will **not** fire — Pages wins the hostname match first.
+> Workarounds are in `worker/ROUTING.md`.
 
-## 5. Cloudflare Access (optional but recommended)
+---
 
-For production deployments, attach Cloudflare Access to `/api/*` so
-humans identify via email-link or GitHub OAuth.
+## 7. ⚠️ Cloudflare Access — required for device registration
 
-CF Access docs are out of scope for this page; the dashboard steps
-are:
+**Device registration derives identity from Cloudflare Access and
+nowhere else.** `POST /api/keys/register` reads the
+`cf-access-authenticated-user-email` header; if it is absent the
+request is rejected with **401 `access_required`**. A `user_id` in the
+request body is **ignored** and cannot substitute for the header.
 
-1. **Zero Trust → Access → Applications → Add** → Self-hosted.
-2. Set the application domain to `api.yourdomain.com`.
-3. Add a policy: `*.yourdomain.com` emails in the allow list, OR
-   `email` ends in `@yourdomain.com`.
-4. Save → grab the application's **AUD** tag.
-5. Set `CF_ACCESS_AUD` in `wrangler.toml` and re-deploy.
+So you must attach Access to the hostname you are serving the API from:
 
-The Worker validates the `Cf-Access-Jwt-Assertion` cookie on
-`/api/*` (and trusts the user's email hash). It does NOT validate
-on `/mem/v1/*` because that path is bot-only, bot-trust comes from
-the JWT grant instead.
+1. **Zero Trust → Access → Applications → Add** → *Self-hosted*.
+2. **Application domain**: the API hostname — e.g.
+   `seele-memory.<your-subdomain>.workers.dev` (or
+   `api.yourdomain.com`).
+3. **Add a policy**: e.g. email ends in `@yourdomain.com`, or an
+   allowlist of specific addresses.
+4. Save.
+5. Re-deploy (the Worker reads the header at request time, but the
+   Access app must exist before the header is injected):
+   ```bash
+   npx wrangler deploy
+   ```
 
-## 6. Smoke test
+> ### ⚠️ The Worker trusts the header — it does not verify a JWT
+>
+> The Worker reads `cf-access-authenticated-user-email` **directly**. It
+> does **not** validate a `Cf-Access-Jwt-Assertion` token.
+>
+> This is safe *only because Cloudflare strips that header from
+> client-supplied requests* and re-injects it only for allowlisted
+> identities. That stripping only happens if **Access is actually bound
+> to the hostname**.
+>
+> **If Access is not bound, anyone can send the header themselves and
+> mint a device token for any identity.** Treat "Access is bound to my
+> API hostname" as a hard requirement of this guide, not an
+> optimisation. Verify it with the smoke test below — the request must
+> come back **401**, not 200.
+
+---
+
+## 8. Smoke test
 
 ```bash
-# Health check — no auth required.
-curl https://api.yourdomain.com/api/mem/health
+# 1. Health — no auth required.
+curl -s https://YOUR-HOST/api/mem/health
+# expect: {"ok":true,...}
 
-# Register a device.
-curl -X POST https://api.yourdomain.com/api/keys/register \
+# 2. Device registration — must be 401 without an Access identity.
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://YOUR-HOST/api/keys/register \
   -H 'content-type: application/json' \
-  -d '{
-    "user_id":"alice@yourdomain.com",
-    "device":{"device_id":"d1","name":"laptop","platform":"linux","app_version":"0.10.0"}
-  }'
+  -d '{"device":{"device_id":"d1","name":"laptop","platform":"linux","app_version":"0.2.0"}}'
+# expect: 401   <-- proves the endpoint fails closed
+#
+# A 200 here means Access is NOT bound to your hostname. Stop and
+# complete step 7 before exposing this Worker.
+```
 
-# Mint a bot. Use the device_token from the previous response.
-curl -X POST https://api.yourdomain.com/api/bots \
+Then, from a browser or `curl` **through an Access-authenticated
+session**, registration should succeed and return a device token:
+
+```json
+{
+  "user_id": "<derived from your Access email>",
+  "device_id": "d1",
+  "device_token": "<HS256 JWT>",
+  "token_type": "Bearer",
+  "expires_at": "<365 days out>",
+  "scope": "memory:write"
+}
+```
+
+> **Do not put `user_id` in the request body.** The fixed endpoint
+> ignores it. If you pass it you will get a confusing 401 on a
+> correctly-configured deployment.
+>
+> The device token is long-lived (**365 days**) — that is by design for
+> a device credential, which is why `POST /api/keys/revoke` exists.
+
+### Mint a bot and recall
+
+```bash
+# Mint a bot grant from the device token.
+curl -X POST https://YOUR-HOST/api/bots \
   -H 'content-type: application/json' \
   -H 'authorization: Bearer <device_token>' \
   -d '{"name":"my-bot","ttl_seconds":900}'
 
-# Recall. Use the bot's grant.jwt from the previous response.
-curl -X POST https://api.yourdomain.com/mem/v1/recall \
+# Recall using the bot's short-lived grant JWT.
+curl -X POST https://YOUR-HOST/mem/v1/recall \
   -H 'content-type: application/json' \
   -H 'authorization: Bearer <bot_grant_jwt>' \
-  -d '{"query_vector":[0.0, 0.1, ... 384 floats ...], "top_k":5}'
+  -d '{"query_vector":[...384 floats...],"top_k":5}'
 ```
 
-## 7. Wire the SDK to your deployment
+Bot grants default to **15 minutes** (`GRANT_JWT_DEFAULT_TTL_SECONDS`);
+device tokens default to **365 days**.
+
+---
+
+## 9. Run the test suite
+
+```bash
+npm test
+```
+
+Expected: **74 tests passing** across 5 files (`auth`, `keys`, `sync`,
+`recall`, `bots`). The suite runs entirely against in-memory fakes — no
+Cloudflare account or network access needed.
+
+---
+
+## Using the SDK
+
+```bash
+npm install @seele/memory-client
+```
 
 ```ts
 import { SeeleCloudClient } from '@seele/memory-client'
 
 const client = new SeeleCloudClient({
-  baseUrl: 'https://api.yourdomain.com',
-  deviceToken: '...',
+  baseUrl: 'https://seele-memory.<your-subdomain>.workers.dev',
+  // optional — defaults to the official public deployment
 })
+
+// Enroll this device. Requires the request to carry a CF Access identity.
+const { device_token } = await client.registerDevice({
+  user_id: 'ignored-by-the-server',
+  device: {
+    device_id: 'd1',
+    name: 'laptop',
+    platform: 'linux',
+    app_version: '0.2.0',
+  },
+})
+
+const bot = await client.createBot({ name: 'my-bot', ttl_seconds: 900 })
 ```
 
-The SDK's `DEFAULT_BASE_URL` constant points at the official
-public deployment — pass `baseUrl` to override.
+`DEFAULT_BASE_URL` points at the official public deployment — pass
+`baseUrl` to override it.
 
-## Limitations of self-hosting in v0.10.0
+> The SDK's `RegisterDeviceRequest` still has a required `user_id`
+> field for backwards compatibility. The server **ignores it**;
+> identity always comes from Cloudflare Access.
 
-- The repo is **private**. Mirror it internally if you need to.
-- Webhook delivery for captures is HTTP only (no iOS/Android FFI
-  bridge yet).
-- Shamir share recovery is opt-in and not yet automated.
-- The Rust-side embedder is the hash-based stub; until v0.11.0,
-  Rust-captured snippets won't recall cleanly from a JS embedder
-  bot (or vice versa). See `docs/embedding.md`.
+---
+
+## Limitations
+
+- **Webhooks are HTTP-only.** No iOS/Android FFI bridge yet.
+- **Shamir share recovery is opt-in** and not yet automated.
+- **Custom domains conflict with Pages** on the same hostname (see
+  `worker/ROUTING.md`).
+- **Access must be bound** for device registration to work at all —
+  see step 7.
+- **Cross-embedding recall needs matching embedders.** The JS Worker
+  and the Rust `xkg-core` must use the same model
+  (`bge-small-en-v1.5`, 384 dims). v0.11.0 replaced the Rust
+  hash-based stub with a real ONNX embedder; earlier captures encoded
+  with the old stub will not recall correctly and must be re-embedded.
+  See `docs/embedding.md`.
 
 ## Hidden gotchas
 
-- **One secret, two places.** `GRANT_JWT` lives both in
-  `.dev.vars` (local) and as a `wrangler secret` (remote). They
-  are not the same storage; local doesn't auto-sync to remote.
-  Run `wrangler secret put GRANT_JWT` once per environment.
-- **The first 60-120s after deploy.** New workers.dev hosts need
-  time to issue the edge certificate; the first requests fail with
-  `sslv3 alert handshake failure`. That's normal, not your bug.
-- **Vectorize index name ≠ binding.** The `index_name` is the
-  resource in Cloudflare; the `binding` is the variable name the
-  Worker uses (`env.VECTORIZE`). Get them right or you get
-  `binding not configured` at runtime.
-- **D1 migrations are forward-only.** `wrangler d1 migrations
-  apply --remote` runs forward migrations; to roll back, write
-  reverse SQL by hand and apply it as a new migration.
+- **Vectorize dimension must be 384.** Mismatched dimensions produce a
+  binding error, not a soft failure.
+- **`GRANT_JWT` is one secret in two stores** (local `.dev.vars` and
+  remote `wrangler secret`). They do not sync.
+- **The first 60–120s after deploy** can fail with
+  `sslv3 alert handshake failure` while the edge certificate is issued.
+- **D1 migrations are forward-only.**
+- **Workers.dev vs Pages:** Pages wins the hostname match. If your
+  routes "don't fire", check for a Pages project on that hostname
+  first.
+- **`wrangler whoami` succeeding does not mean you can deploy.** It
+  only validates the token. A `cfut_` user token passes `whoami` and
+  then fails at deploy with 7403 / "No access to the specified resource".

@@ -125,12 +125,41 @@ GET    /api/sync/state                    User's sync state (cursors, last seen)
 
 ### Recall endpoint (NEW, only at seele-cloud)
 ```
-POST   /mem/v1/recall                     Body: { query, top_k, kinds, scope_tags }
-                                         Response: { snippets: [{id, score, encrypted_chunk, source}], query_id }
-POST   /mem/v1/full-recall                Body: { ..., grant_jwt }
-                                         Response: { conversations: [decrypted payloads] }
+POST   /mem/v1/recall                     Body: { query_vector[384], top_k?, since? }
+                                         Response: { snippets: [Snippet], query_id }
+POST   /mem/v1/full-recall                Body: { query, limit?, since? }
+                                         Response: { matches: [Snippet], query_id }
 GET    /mem/v1/health                     Status: { ok, version, last_reindex_at }
 ```
+
+**v1.0.0 response contract (locked — TASK-seele-cloud-20261116-109).**
+The `Snippet` object has EXACTLY these five keys — no more, no fewer:
+
+| field            | type            | notes                                    |
+|------------------|-----------------|------------------------------------------|
+| `chunk_id`       | string          | opaque chunk identifier                  |
+| `score`          | number          | cosine similarity in [0,1]; keyword path uses `1.0` |
+| `conversation_id`| string \| null  | owning conversation                      |
+| `created_at`     | number          | unix-ms integer                           |
+| `body_encrypted` | string          | base64 ciphertext — the server never decrypts |
+
+Top level is exactly `{ snippets, query_id }` for `recall` and
+`{ matches, query_id }` for `full-recall`. `query_id` is a UUID string.
+
+An unknown query returns **HTTP 200 with an empty list** — never a 404
+and never an error object. An unauthenticated request to any protected
+route returns **HTTP 401** with `{ error, message }` and no data fields.
+
+These shapes are machine-checked, not just documented:
+`worker/test/recall-contract.test.js` (server side) and
+`sdk/typescript/test/recall-contract.test.ts` (client side) assert the
+exact key sets. A field rename fails CI instead of failing in production.
+See also §"Open Questions" and the note on the route prefix below.
+
+> **Route prefix note.** The recall routes are mounted at `/mem/v1/*`,
+> NOT `/api/mem/v1/*`. The `/api/mem/*` prefix belongs to the health
+> route (`GET /api/mem/health`). This matches the wrangler route table
+> (`seele.agency/mem/*`) and the SDK's `client.post('/mem/v1/recall')`.
 
 `recall` returns encrypted chunks (vector + keyword searched). The bot SDK `@seele/memory-client` decrypts locally using the same key tree.
 

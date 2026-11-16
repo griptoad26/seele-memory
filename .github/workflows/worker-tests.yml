@@ -1,0 +1,78 @@
+name: worker-tests
+
+# The Cloudflare Worker's vitest suite. This is what gates the recall
+# API contract (TASK-seele-cloud-20261116-109) — a rename of a field
+# in the /mem/v1/recall response must fail here, not in production.
+#
+# The SDK has its own workflow (npm-publish.yml) that runs on release
+# tags; this one runs on every push and PR so contract regressions are
+# caught before they reach a tag.
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - 'task/**'
+      - 'feature/**'
+    paths:
+      - 'worker/**'
+      - 'scripts/**'
+      - 'CHANGELOG.md'
+      - '.github/workflows/worker-tests.yml'
+  pull_request:
+    paths:
+      - 'worker/**'
+      - 'scripts/**'
+      - 'CHANGELOG.md'
+      - '.github/workflows/worker-tests.yml'
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: worker unit + contract tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Node 22 is REQUIRED, not a preference: test/devices-unique-index.test.js
+          # imports `node:sqlite` (real SQLite), which landed in Node 22.5.
+          # On Node 20 the import throws and the suite fails in CI while
+          # passing locally. Do not downgrade this without replacing the
+          # node:sqlite usage.
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Release script contract
+        # scripts/release.sh is the only thing that touches production and
+        # it lives outside worker/, so it gets its own gate here: the
+        # version it publishes must agree with the CHANGELOG, the
+        # credential probe must exercise the WRITE path (a read-only
+        # token authenticates and lists Workers metadata fine), and the
+        # dry run must walk every step without writing anything.
+        #
+        # No test in this file contacts Cloudflare.
+        run: npx vitest run test/release-script.test.js
+
+      - name: E2E multi-device sync (local D1)
+        # Runs the REAL Worker against a REAL local D1 (miniflare/workerd
+        # SQLite, foreign keys enforced) with a local Vectorize. It never
+        # contacts production — test/local-worker.js refuses any non-loopback
+        # host and reads no Cloudflare credentials.
+        #
+        # This is the suite from TASK-seele-cloud-20261116-110. It proves
+        # sync convergence across 3 devices, that the embedding round-trips
+        # as a real vector, and that a revoked device token stops working.
+        run: npm run test:e2e
