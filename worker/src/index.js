@@ -30,7 +30,12 @@
 // ---------------------------------------------------------------------------
 
 const SERVICE = 'seele-cloud';
-const VERSION = '0.2.0-phase2';
+// Single source of truth for the deployed version. The release script
+// (`scripts/release.sh`) refuses to publish unless this string matches
+// the `--version` it was given and the CHANGELOG.md section exists, so a
+// release can never ship a Worker that reports a different version than
+// the changelog claims.
+const VERSION = '1.0.0';
 
 // ---------------------------------------------------------------------------
 // CORS

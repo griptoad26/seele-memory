@@ -78,10 +78,21 @@ Creates `seele-memory-db` (D1) and `seele-memory-embeddings` (Vectorize,
 
 ## Deploy
 
+For a **release** (migrations + deploy + Vectorize reindex + version check +
+tag), use the release script from the repo root:
+
+```bash
+../scripts/release.sh --version 1.0.0
+```
+
+See [`../docs/release.md`](../docs/release.md) for the full procedure.
+
+For an ad-hoc deploy of the Worker alone:
+
 ```bash
 ./scripts/deploy.sh
 # or step-by-step:
-wrangler d1 execute seele-memory-db --remote --file=migrations/0001_initial.sql
+wrangler d1 migrations apply seele-memory-db --remote
 wrangler secret put GRANT_JWT      # paste the secret value at the prompt
 wrangler deploy
 ```

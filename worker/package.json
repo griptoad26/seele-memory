@@ -1,6 +1,6 @@
 {
   "name": "seele-memory-worker",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Cloudflare Worker implementing the seele-cloud memory backend. See ../SPEC.md for the full contract.",
   "main": "src/index.js",
   "private": true,
