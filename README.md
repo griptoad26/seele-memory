@@ -50,7 +50,6 @@ seele-memory/
 │       ├── package.json
 │       └── README.md
 ├── examples/                        Claude / Vercel AI SDK / LangChain
-<<<<<<< HEAD
 ├── docs/                            architecture, embedding, release, self-host, security model
 │                                    + API stability contract (API-STABILITY.md)
 ├── scripts/release.sh               ← publish a release: migrate, deploy, reindex, tag
