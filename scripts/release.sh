@@ -322,18 +322,31 @@ reindex_vectorize() {
     return 0
   fi
 
-  # Parse the vector count. The `|| echo 0` fallback is INSIDE the
-  # substitution rather than appended to it: `cmd | node ... || echo 0`
-  # would append a second "0" when the node parser itself fails, giving
-  # a two-line value that then breaks the `[[ "$count" -eq 0 ]]` test
-  # with a syntax error. The node parser already handles bad input by
-  # printing 0, so the shell fallback is redundant and harmful.
+  # Parse the vector count.
+  #
+  # Two shell details bite here:
+  #
+  #   * `cmd | parser || echo 0` would append a SECOND "0" when the parser
+  #     itself fails, giving a two-line value that then breaks the
+  #     `[[ "$count" -eq 0 ]]` test with a syntax error. The node parser
+  #     already handles bad input by printing 0, so the shell fallback is
+  #     redundant and harmful.
+  #
+  #   * `head -1` closes the pipe after the first line, which SIGPIPEs the
+  #     upstream `node`. Under `set -o pipefail` that non-zero status
+  #     propagates and kills the script INSIDE the command substitution —
+  #     before any output, with no error message. So: no `head`. The
+  #     parser prints exactly one number, and `tr -dc '0-9'` strips
+  #     anything else.
   local count
   count="$(npx --no-install wrangler vectorize list-vectors "$VEC_INDEX" --count 1000 --json 2>/dev/null \
     | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const v=(j.result&&j.result.vectors)||j.vectors||[];console.log(Array.isArray(v)?v.length:0)}catch(e){console.log(0)}})' \
-    | head -1 | tr -dc '0-9')"
+    | tr -dc '0-9' || true)"
   count="${count:-0}"
 
+  # Probe readability/scope BEFORE acting on the count, so a permission
+  # problem reports the actual cause instead of "Please provide valid
+  # vector identifiers for deletion".
   if ! npx --no-install wrangler vectorize list-vectors "$VEC_INDEX" --count 1 --json >/dev/null 2>&1; then
     die "Cannot read the Vectorize index '$VEC_INDEX'.
   The token needs Vectorize scope, and the index must exist
