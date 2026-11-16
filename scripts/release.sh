@@ -322,10 +322,23 @@ reindex_vectorize() {
     return 0
   fi
 
-  local count=0
+  # Parse the vector count. The `|| echo 0` fallback is INSIDE the
+  # substitution rather than appended to it: `cmd | node ... || echo 0`
+  # would append a second "0" when the node parser itself fails, giving
+  # a two-line value that then breaks the `[[ "$count" -eq 0 ]]` test
+  # with a syntax error. The node parser already handles bad input by
+  # printing 0, so the shell fallback is redundant and harmful.
+  local count
   count="$(npx --no-install wrangler vectorize list-vectors "$VEC_INDEX" --count 1000 --json 2>/dev/null \
-    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const v=(j.result&&j.result.vectors)||j.vectors||[];console.log(v.length)}catch(e){console.log(0)}})' \
-    || echo 0)"
+    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const v=(j.result&&j.result.vectors)||j.vectors||[];console.log(Array.isArray(v)?v.length:0)}catch(e){console.log(0)}})' \
+    | head -1 | tr -dc '0-9')"
+  count="${count:-0}"
+
+  if ! npx --no-install wrangler vectorize list-vectors "$VEC_INDEX" --count 1 --json >/dev/null 2>&1; then
+    die "Cannot read the Vectorize index '$VEC_INDEX'.
+  The token needs Vectorize scope, and the index must exist
+  (wrangler vectorize create $VEC_INDEX --dimensions=384 --metric=cosine)."
+  fi
 
   info "vectors currently in the index: $count"
 
@@ -342,7 +355,7 @@ reindex_vectorize() {
   local ids
   ids="$(npx --no-install wrangler vectorize list-vectors "$VEC_INDEX" --count 1000 --json 2>/dev/null \
     | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const v=(j.result&&j.result.vectors)||j.vectors||[];for(const x of v){const id=typeof x==="string"?x:(x.id||x.vector_id||"");if(id)process.stdout.write(id+"\n")}}catch(e){}})' \
-    || true)"
+    | tr -d '\r' || true)"
 
   local id_count
   id_count="$(printf '%s' "$ids" | grep -c . || true)"
