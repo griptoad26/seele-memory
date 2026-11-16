@@ -36,7 +36,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # Node 22 is REQUIRED, not a preference: test/devices-unique-index.test.js
+          # imports `node:sqlite` (real SQLite), which landed in Node 22.5.
+          # On Node 20 the import throws and the suite fails in CI while
+          # passing locally. Do not downgrade this without replacing the
+          # node:sqlite usage.
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: worker/package-lock.json
 
